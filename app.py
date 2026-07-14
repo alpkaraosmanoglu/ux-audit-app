@@ -24,7 +24,7 @@ SKILLS_DIR = APP_DIR / "skills"
 AUDIT_SKILL_DIR = SKILLS_DIR / "ux-audit-skill"
 DECK_SKILL_DIR = SKILLS_DIR / "ux-audit-deck-skill"
 
-# NOT: Claude modelleri için "claude-3-5-sonnet-20241022" veya "claude-3-opus-20240229" gibi geçerli resmi model adları tercih edilmelidir.
+# Kararlı ve güncel bir model ismi atandı
 MODEL = "claude-3-5-sonnet-latest" 
 
 # ============================================================
@@ -121,10 +121,9 @@ with st.sidebar:
         ),
     )
     if api_key:
-        st.session_state.api_key = api_key.strip()  # Boşlukları temizleyerek kaydet
+        st.session_state.api_key = api_key.strip()
         st.success("Key set for this session.")
     else:
-        # Eğer input temizlendiyse session state'ten de kaldıralım
         if "api_key" in st.session_state:
             del st.session_state["api_key"]
 
@@ -133,3 +132,21 @@ with st.sidebar:
     st.caption(
         "**Costs:** each audit calls Claude with your key. "
         "A typical audit costs $0.20–$0.80 depending on screenshot count."
+    )
+
+# --- Main form ---
+
+# API Key kontrolü
+if "api_key" not in st.session_state or not st.session_state.api_key:
+    st.warning("👈 Paste your Anthropic API key in the sidebar to start.")
+    st.stop()
+
+# İstemciyi güvenli başlatma
+try:
+    client = Anthropic(api_key=st.session_state.api_key)
+except Exception as e:
+    st.error(f"Anthropic istemcisi başlatılamadı. Hata: {e}")
+    st.stop()
+
+# Initialize session state
+for key, default in
