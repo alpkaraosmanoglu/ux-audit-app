@@ -24,7 +24,7 @@ SKILLS_DIR = APP_DIR / "skills"
 AUDIT_SKILL_DIR = SKILLS_DIR / "ux-audit-skill"
 DECK_SKILL_DIR = SKILLS_DIR / "ux-audit-deck-skill"
 
-# Kararlı ve güncel bir model ismi atandı
+# Kararlı ve güncel Anthropic model ismi tanımlandı
 MODEL = "claude-3-5-sonnet-latest" 
 
 # ============================================================
@@ -136,12 +136,12 @@ with st.sidebar:
 
 # --- Main form ---
 
-# API Key kontrolü
+# GÜVENLİ KONTROL: Session state içinde api_key anahtarı var mı ve içi gerçekten dolu mu?
 if "api_key" not in st.session_state or not st.session_state.api_key:
     st.warning("👈 Paste your Anthropic API key in the sidebar to start.")
     st.stop()
 
-# İstemciyi güvenli başlatma
+# İstemciyi sadece geçerli bir API anahtarı olduğunda güvenli başlatma
 try:
     client = Anthropic(api_key=st.session_state.api_key)
 except Exception as e:
@@ -149,4 +149,197 @@ except Exception as e:
     st.stop()
 
 # Initialize session state
-for key, default in
+for key, default in [
+    ("audit_text", None),
+    ("audit_config", None),
+    ("screenshots", []),
+]:
+    if key not in st.session_state:
+        st.session_state[key] = default
+
+# --- Form for configuring the audit ---
+with st.form("audit_config_form"):
+    st.subheader("1. Language")
+    language = st.radio(
+        "Which language?",
+        ["English", "Türkçe", "Deutsch"],
+        horizontal=True,
+    )
+
+    st.subheader("2. Mode")
+    mode = st.radio(
+        "How will you provide the product?",
+        [
+            "Screenshots (recommended)",
+            "URLs only",
+            "Hybrid (URLs + screenshots)",
+        ],
+    )
+    st.caption(
+        "Screenshots gives you a full visual audit. URLs only produces a "
+        "structural audit — no visual analysis. See the sidebar for details."
+    )
+
+    st.subheader("3. Benchmarking")
+    benchmark = st.radio(
+        "Include benchmarks?",
+        ["None", "Market only", "Competitors only", "Both"],
+    )
+
+    competitors = ""
+    market = ""
+    if benchmark in ["Competitors only", "Both"]:
+        competitors = st.text_area(
+            "Competitors (one per line, or leave blank to have Claude suggest based on product/market)",
+            placeholder="Cuvva\nLemonade\nAllianz Direct",
+        )
+    if benchmark in ["Market only", "Both"]:
+        market = st.text_input(
+            "Market / sector",
+            placeholder="e.g. B2B pharmacy platforms, direct-to-consumer insurance, rural e-commerce",
+        )
+
+    st.subheader("4. Context")
+    product_name = st.text_input("Product name and category *", placeholder="e.g. LANDI — Swiss rural retail e-commerce")
+    target_users = st.text_area(
+        "Target users (optional)",
+        placeholder="Leave blank if unknown — Claude will infer from context.",
+        height=80,
+    )
+    audience = st.text_input(
+        "Audience for the audit (optional)",
+        placeholder="e.g. senior leadership, internal product team",
+    )
+    scope = st.text_area(
+        "Scope (optional)",
+        placeholder="Which flows or pages to focus on",
+        height=80,
+    )
+
+    st.subheader("5. Screenshots")
+    screenshots = st.file_uploader(
+        "Upload product screenshots",
+        type=["png", "jpg", "jpeg"],
+        accept_multiple_files=True,
+        help="Label them clearly if you can — Claude will reference them by number.",
+    )
+
+    competitor_screenshots = None
+    if benchmark in ["Competitors only", "Both"]:
+        competitor_screenshots = st.file_uploader(
+            "Competitor screenshots (optional, strongly recommended for benchmark slides)",
+            type=["png", "jpg", "jpeg"],
+            accept_multiple_files=True,
+        )
+
+    urls = ""
+    if mode in ["URLs only", "Hybrid (URLs + screenshots)"]:
+        urls = st.text_area(
+            "URLs (one per line)",
+            placeholder="https://example.com/homepage\nhttps://example.com/product",
+        )
+
+    generate = st.form_submit_button("Generate audit →", type="primary")
+
+# --- Run audit ---
+
+if generate:
+    if not product_name:
+        st.error("Product name is required.")
+        st.stop()
+    if mode == "Screenshots (recommended)" and not screenshots:
+        st.error("Please upload at least one screenshot.")
+        st.stop()
+
+    st.session_state.audit_config = {
+        "language": language,
+        "mode": mode,
+        "benchmark": benchmark,
+        "competitors": competitors,
+        "market": market,
+        "product_name": product_name,
+        "target_users": target_users,
+        "audience": audience,
+        "scope": scope,
+        "urls": urls,
+    }
+    st.session_state.screenshots = screenshots or []
+    st.session_state.competitor_screenshots = competitor_screenshots or []
+
+    # Build the user message from the form
+    context_lines = [
+        f"**Language chosen:** {language}",
+        f"**Mode chosen:** {mode}",
+        f"**Benchmarking scope:** {benchmark}",
+    ]
+    if competitors:
+        context_lines.append(f"**Competitors:** {competitors}")
+    if market:
+        context_lines.append(f"**Market/sector:** {market}")
+    context_lines.append(f"**Product:** {product_name}")
+    if target_users:
+        context_lines.append(f"**Target users:** {target_users}")
+    else:
+        context_lines.append("**Target users:** Not specified — infer from product context.")
+    if audience:
+        context_lines.append(f"**Audience for audit:** {audience}")
+    if scope:
+        context_lines.append(f"**Scope:** {scope}")
+    if urls:
+        context_lines.append(f"**URLs:** {urls}")
+
+    user_text = (
+        "The user has already answered your language, mode, and benchmark questions. "
+        "Skip Step 0a, 0b, 0c and proceed directly to Phase 1 — the written audit — "
+        "in the chosen language.\n\n"
+        + "\n".join(context_lines)
+        + f"\n\n**Screenshots attached:** {len(screenshots or [])}"
+    )
+
+    system_prompt = load_skill_prompt(AUDIT_SKILL_DIR)
+    message_content = build_message_content(user_text, screenshots or [])
+
+    st.subheader("Written audit")
+    with st.spinner("Running audit..."):
+        try:
+            audit_text = run_claude(client, system_prompt, message_content)
+            st.session_state.audit_text = audit_text
+            st.success("Audit complete. Scroll down to generate the presentation deck.")
+        except Exception as ex:
+            st.error(f"API Call failed. Error detail: {ex}")
+
+# --- Deck generation ---
+
+if st.session_state.audit_text:
+    st.divider()
+    st.subheader("Presentation deck")
+    st.caption("Generate the .pptx and .pdf using the adesso template.")
+
+    if st.button("Generate deck →", type="primary"):
+        deck_system = load_skill_prompt(DECK_SKILL_DIR)
+
+        deck_user = (
+            "Generate the presentation deck for this audit. Use the adesso template "
+            "bundled with the skill (assets/adesso_template.pptx). Below is the completed "
+            "written audit — parse it and produce the .pptx following the skill's slide "
+            "sequence.\n\n"
+            "**Written audit:**\n\n"
+            + st.session_state.audit_text
+            + "\n\n**Language:** "
+            + st.session_state.audit_config["language"]
+            + "\n\n**Screenshots available:** filenames as attached in this message.\n\n"
+            "Write a Python script that builds the deck using python-pptx."
+        )
+
+        st.info(
+            "Note: For this MVP, the deck skill is provided as reference. "
+            "In v2, the app will execute the Python script server-side."
+        )
+
+    # --- Download the written audit ---
+    st.download_button(
+        "Download written audit (.md)",
+        data=st.session_state.audit_text,
+        file_name="ux_audit.md",
+        mime="text/markdown",
+    )
