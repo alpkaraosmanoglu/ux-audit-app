@@ -532,6 +532,7 @@ elif st.session_state.step == "generating":
             api_key=st.session_state.api_key,
             system_prompt=system_prompt,
             user_message=user_message,
+            enable_web_search=(benchmark != "none"),
         ):
             if event_type == "text":
                 full_text += data
