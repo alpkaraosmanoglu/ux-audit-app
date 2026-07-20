@@ -160,7 +160,7 @@ def generate_deck(
     language: str,
     mode: str,
     benchmark: str,
-    screenshots: dict[str, bytes] | None = None,
+    screenshots: list[dict] | None = None,
     tally: dict[str, int] | None = None,
     target_users: str = "",
     pages_reviewed: str = "",
@@ -171,11 +171,13 @@ def generate_deck(
 
     Args:
         findings: list of parsed finding dicts from audit_engine.parse_findings
+            (each may include a `screenshot_index`, 1-based, matching upload order)
         product_name: name for the cover slide
         language: 'English', 'Türkçe', or 'Deutsch'
         mode: 'screenshots', 'urls', or 'hybrid'
         benchmark: 'none', 'market', 'competitors', or 'both'
-        screenshots: dict mapping screenshot name to image bytes
+        screenshots: list of dicts with 'name' and 'data' (bytes), in upload order —
+            index N-1 corresponds to a finding's screenshot_index == N
         tally: severity tally dict
         target_users: for the overview slide
         pages_reviewed: for the overview slide
@@ -186,7 +188,10 @@ def generate_deck(
         bytes of the generated .pptx file
     """
     labels = _get_labels(language)
-    screenshots = screenshots or {}
+    screenshots = screenshots or []
+    # Name-based lookup stays available as a fallback for findings without a
+    # reliable numeric screenshot_index (e.g. audits edited by hand).
+    screenshots_by_name = {s["name"]: s["data"] for s in screenshots}
 
     # Prepare template
     template = str(TEMPLATE_PATH)
@@ -268,9 +273,16 @@ def generate_deck(
 
         # Individual finding slides
         for f in sev_findings:
-            # Determine if we have a matching screenshot
-            shot_name = _extract_screenshot_name(f.get("evidence", ""))
-            shot_data = _find_screenshot(shot_name, screenshots) if shot_name else None
+            # Determine if we have a matching screenshot. Prefer the reliable
+            # numeric screenshot_index (1-based, matches upload order) since
+            # it doesn't depend on the model reproducing a filename exactly.
+            shot_data = None
+            shot_idx = f.get("screenshot_index")
+            if shot_idx and 1 <= shot_idx <= len(screenshots):
+                shot_data = screenshots[shot_idx - 1]["data"]
+            if shot_data is None:
+                shot_name = _extract_screenshot_name(f.get("evidence", ""))
+                shot_data = _find_screenshot(shot_name, screenshots_by_name) if shot_name else None
 
             if shot_data:
                 slide = add_slide(prs, LAYOUT_PICTURE)
@@ -319,8 +331,8 @@ def generate_deck(
             "Benchmarks"
         )
         set_title(slide, bench_title)
-        # Truncate benchmark text for slide body (max ~200 words)
-        bench_body = _truncate_for_slide(benchmark_text, 200)
+        # Truncate benchmark text for slide body — keep it scannable
+        bench_body = _truncate_for_slide(benchmark_text, 90)
         try:
             set_body_lines(slide, PH_BODY_CONTENT, [bench_body])
         except RuntimeError:
@@ -418,7 +430,9 @@ def _format_finding_body(finding: dict, labels: dict) -> list:
         paragraphs = body_text.strip().split("\n\n")
         main_text = paragraphs[0] if paragraphs else body_text
 
-    main_text = _truncate_for_slide(main_text, 120)
+    # Slide real estate is limited, especially when a screenshot occupies
+    # half the slide — keep each block scannable, not a paragraph dump.
+    main_text = _truncate_for_slide(main_text, 45)
     lines.append((labels.get("finding", "Finding"), main_text))
 
     # Suggestions or Solution
@@ -427,13 +441,13 @@ def _format_finding_body(finding: dict, labels: dict) -> list:
         body_text, re.DOTALL
     )
     if sugg_match:
-        sugg_text = _truncate_for_slide(sugg_match.group(1).strip(), 80)
+        sugg_text = _truncate_for_slide(sugg_match.group(1).strip(), 30)
         label_key = "solution" if "Solution" in sugg_match.group(0) or "Çözüm" in sugg_match.group(0) or "Lösung" in sugg_match.group(0) else "suggestions"
         lines.append((labels.get(label_key, "Suggestions"), sugg_text))
 
     # Heuristic
     if finding.get("heuristic"):
-        heur_text = _truncate_for_slide(finding["heuristic"], 50)
+        heur_text = _truncate_for_slide(finding["heuristic"], 18)
         lines.append((labels.get("heuristic", "Heuristic"), heur_text))
 
     return lines

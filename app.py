@@ -9,18 +9,22 @@ Methodology:     ux-audit-skill (written audit) + ux-audit-deck-skill (deck)
 """
 
 import io
+import json
 import re
 import time
 from datetime import datetime
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 from styles import CUSTOM_CSS
 from audit_engine import (
     build_system_prompt,
     build_user_message,
+    compose_audit_markdown,
     parse_findings,
     severity_tally,
+    split_header,
     stream_audit,
     tally_string,
 )
@@ -54,12 +58,15 @@ DEFAULTS = {
     "scope_notes": "",
     "urls_text": "",
     "benchmark": "none",
+    "market_sector": "",
     "competitors": [{"name": "", "url": ""}],
     "screenshots": [],       # list of {"name": str, "data": bytes, "mime_type": str}
     "comp_screenshots": {},   # comp_idx -> list of {"name", "data", "mime_type"}
     "audit_text": "",
+    "audit_header": "",
     "audit_findings": [],
     "audit_tally": {},
+    "edit_mode": False,
     "deck_bytes": None,
     "generating": False,
     "deck_generating": False,
@@ -71,6 +78,33 @@ for k, v in DEFAULTS.items():
 
 def go(step: str):
     st.session_state.step = step
+
+
+def copy_to_clipboard_button(text: str, label: str = "Copy audit", key: str = "copy"):
+    """A one-click copy button. Streamlit has no native clipboard API, so this
+    renders a small HTML/JS button in an iframe via components.html — a
+    documented simplification versus a native button, but works reliably
+    across browsers without extra dependencies.
+    """
+    safe_text = json.dumps(text)
+    components.html(
+        f"""
+        <button id="{key}" style="
+            font-family: 'DM Sans', sans-serif; font-size: 14px; font-weight: 600;
+            padding: 8px 16px; border-radius: 0; border: 1.5px solid #e4e4e7;
+            background: #ffffff; color: #0b0b0c; cursor: pointer; width: 100%;
+        ">{label}</button>
+        <script>
+        const btn = document.getElementById("{key}");
+        btn.addEventListener("click", function() {{
+            navigator.clipboard.writeText({safe_text});
+            btn.innerText = "Copied ✓";
+            setTimeout(() => btn.innerText = "{label}", 1500);
+        }});
+        </script>
+        """,
+        height=42,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -363,9 +397,22 @@ elif st.session_state.step == "config":
         unsafe_allow_html=True,
     )
 
+    # Market / sector field
+    if st.session_state.benchmark in ("market", "both"):
+        st.session_state.market_sector = st.text_input(
+            "Market / sector to benchmark against",
+            value=st.session_state.market_sector,
+            placeholder="e.g. B2B pharmacy platforms, direct-to-consumer insurance, rural e-commerce",
+            help="Used to ground the market benchmark section in the right conventions — leave blank to infer from industry.",
+        )
+
     # Competitor fields
     if st.session_state.benchmark in ("competitors", "both"):
         st.markdown("---")
+        st.caption(
+            "Upload at least one screenshot or add a URL per competitor — without evidence, "
+            "the audit can't ground the comparison and will say so rather than guessing."
+        )
         for i, comp in enumerate(st.session_state.competitors):
             comp_cols = st.columns(2)
             with comp_cols[0]:
@@ -443,6 +490,7 @@ elif st.session_state.step == "generating":
     benchmark = st.session_state.benchmark
 
     competitor_names = [c["name"] for c in st.session_state.competitors if c.get("name")]
+    active_competitors = st.session_state.competitors if benchmark in ("competitors", "both") else None
 
     system_prompt = build_system_prompt(
         language=language,
@@ -455,6 +503,7 @@ elif st.session_state.step == "generating":
         audience=st.session_state.audience,
         scope_notes=st.session_state.scope_notes,
         competitor_names=competitor_names if competitor_names else None,
+        market_sector=st.session_state.market_sector if benchmark in ("market", "both") else "",
     )
 
     urls = [u.strip() for u in st.session_state.urls_text.split("\n") if u.strip()] if st.session_state.urls_text else None
@@ -463,6 +512,8 @@ elif st.session_state.step == "generating":
         mode=mode,
         screenshots=st.session_state.screenshots if mode in ("screenshots", "hybrid") else None,
         urls=urls if mode in ("urls", "hybrid") else None,
+        competitors=active_competitors,
+        comp_screenshots=st.session_state.comp_screenshots if active_competitors else None,
     )
 
     # Status line
@@ -511,8 +562,10 @@ elif st.session_state.step == "generating":
     else:
         # Parse findings
         st.session_state.audit_text = full_text
+        st.session_state.audit_header = split_header(full_text)
         st.session_state.audit_findings = parse_findings(full_text)
         st.session_state.audit_tally = severity_tally(st.session_state.audit_findings)
+        st.session_state.edit_mode = False
 
         time.sleep(0.5)
         go("audit")
@@ -540,33 +593,81 @@ elif st.session_state.step == "audit":
     findings = st.session_state.audit_findings
     tally = st.session_state.audit_tally
 
-    # Build a screenshot lookup dict for display
-    shot_lookup = {}
-    for shot in st.session_state.screenshots:
-        shot_lookup[shot["name"]] = shot["data"]
+    def resolve_screenshot(f: dict):
+        """Look up a finding's screenshot. Prefers the reliable numeric
+        screenshot_index (matches upload order) with a filename-based
+        fallback for audits that were hand-edited or predate this field.
+        """
+        shots = st.session_state.screenshots
+        idx = f.get("screenshot_index")
+        if idx and 1 <= idx <= len(shots):
+            return shots[idx - 1]["data"]
+        ev = f.get("evidence", "")
+        match = re.search(r"(\S+\.(?:png|jpg|jpeg|webp))", ev) if ev else None
+        if match:
+            shot_name = match.group(1).lower()
+            for s in shots:
+                if s["name"].lower() == shot_name or shot_name in s["name"].lower():
+                    return s["data"]
+        return None
 
-    if findings:
+    # --- Edit mode toggle ---
+    top_cols = st.columns([3, 1])
+    with top_cols[1]:
+        edit_label = "Done editing" if st.session_state.edit_mode else "Edit findings"
+        if st.button(edit_label, use_container_width=True):
+            st.session_state.edit_mode = not st.session_state.edit_mode
+            if not st.session_state.edit_mode:
+                # Leaving edit mode: reassemble audit_text + tally from the
+                # (possibly edited) findings list.
+                st.session_state.audit_text = compose_audit_markdown(
+                    st.session_state.audit_header, st.session_state.audit_findings
+                )
+                st.session_state.audit_tally = severity_tally(st.session_state.audit_findings)
+            st.rerun()
+
+    if st.session_state.edit_mode:
+        st.caption("Editing findings. Changes are kept locally until you download or generate a deck.")
+        sev_options = ["MAJOR", "MID", "MINOR", "OPEN QUESTION"]
+        for i, f in enumerate(findings):
+            with st.container(border=True):
+                ecols = st.columns([1, 3, 1])
+                with ecols[0]:
+                    current_sev = f["severity_raw"].upper()
+                    sev_idx = sev_options.index(current_sev) if current_sev in sev_options else 1
+                    new_sev = st.selectbox(
+                        "Severity", sev_options, index=sev_idx, key=f"edit_sev_{i}", label_visibility="collapsed"
+                    )
+                    f["severity_raw"] = new_sev
+                    f["severity"] = {"MAJOR": "major", "MID": "mid", "MINOR": "minor", "OPEN QUESTION": "open"}[new_sev]
+                with ecols[1]:
+                    f["title"] = st.text_input(
+                        "Title", value=f["title"], key=f"edit_title_{i}", label_visibility="collapsed"
+                    )
+                with ecols[2]:
+                    if st.button("Delete", key=f"edit_del_{i}", use_container_width=True):
+                        findings.pop(i)
+                        st.rerun()
+                f["body"] = st.text_area(
+                    "Body (Markdown)", value=f["body"], key=f"edit_body_{i}", height=140, label_visibility="collapsed"
+                )
+        if st.button("+ Add finding"):
+            findings.append({
+                "severity": "mid",
+                "severity_raw": "MID",
+                "title": "New finding",
+                "body": "**Finding:** Describe the observation.\n\n**Solution:** Describe the fix.",
+                "heuristic": "",
+                "evidence": "",
+                "screenshot_index": None,
+                "full_text": "",
+            })
+            st.rerun()
+
+    elif findings:
         for f in findings:
             sev_class = f"sev-{f['severity']}"
-
-            # Try to find matching screenshot
-            shot_name = None
-            ev = f.get("evidence", "")
-            if ev:
-                import re as re_mod
-                match = re_mod.search(r"(\S+\.(?:png|jpg|jpeg|webp))", ev)
-                if match:
-                    shot_name = match.group(1)
-
-            shot_data = None
-            if shot_name:
-                shot_data = shot_lookup.get(shot_name)
-                if not shot_data:
-                    # Fuzzy match
-                    for k, v in shot_lookup.items():
-                        if shot_name.lower() in k.lower() or k.lower() in shot_name.lower():
-                            shot_data = v
-                            break
+            shot_data = resolve_screenshot(f)
 
             col_img, col_text = st.columns([1, 4])
             with col_img:
@@ -574,7 +675,7 @@ elif st.session_state.step == "audit":
                     st.image(shot_data, use_container_width=True)
                 else:
                     st.markdown(
-                        f'<div class="finding-shot">{ev or "—"}</div>',
+                        f'<div class="finding-shot">{f.get("evidence") or "—"}</div>',
                         unsafe_allow_html=True,
                     )
             with col_text:
@@ -609,23 +710,30 @@ elif st.session_state.step == "audit":
     tally_str = tally_string(tally, language) if tally else ""
     st.caption(tally_str)
 
-    action_cols = st.columns([1, 1, 1, 1])
+    action_cols = st.columns([1, 1, 1, 1, 1])
     with action_cols[0]:
         if st.button("Regenerate", type="secondary"):
             go("generating")
             st.rerun()
     with action_cols[1]:
+        copy_to_clipboard_button(st.session_state.audit_text, label="Copy audit", key="copy_audit_btn")
+    with action_cols[2]:
         st.download_button(
             "Download .md",
             data=st.session_state.audit_text,
             file_name=f"ux_audit_{st.session_state.product_name.lower().replace(' ', '_')}.md",
             mime="text/markdown",
         )
-    with action_cols[2]:
+    with action_cols[3]:
         if st.button("Generate deck →", type="primary"):
+            # Ensure any pending edits are folded into audit_text before deck generation.
+            st.session_state.audit_text = compose_audit_markdown(
+                st.session_state.audit_header, st.session_state.audit_findings
+            )
+            st.session_state.audit_tally = severity_tally(st.session_state.audit_findings)
             go("deck_generating")
             st.rerun()
-    with action_cols[3]:
+    with action_cols[4]:
         if st.button("Start new audit"):
             for k, v in DEFAULTS.items():
                 st.session_state[k] = v
@@ -655,11 +763,6 @@ elif st.session_state.step == "deck_generating":
             unsafe_allow_html=True,
         )
 
-    # Build screenshot lookup for deck
-    shot_dict = {}
-    for shot in st.session_state.screenshots:
-        shot_dict[shot["name"]] = shot["data"]
-
     # Extract benchmark text from audit
     benchmark_text = ""
     if st.session_state.benchmark != "none":
@@ -681,7 +784,7 @@ elif st.session_state.step == "deck_generating":
             language=language,
             mode=st.session_state.mode,
             benchmark=st.session_state.benchmark,
-            screenshots=shot_dict,
+            screenshots=st.session_state.screenshots,
             tally=st.session_state.audit_tally,
             target_users=st.session_state.target_users,
             pages_reviewed=pages,
