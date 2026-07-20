@@ -19,9 +19,11 @@ import streamlit.components.v1 as components
 
 from styles import CUSTOM_CSS
 from audit_engine import (
+    VERIFICATION_TAG_RE,
     build_system_prompt,
     build_user_message,
     compose_audit_markdown,
+    extract_benchmark_section,
     parse_findings,
     severity_tally,
     split_header,
@@ -105,6 +107,41 @@ def copy_to_clipboard_button(text: str, label: str = "Copy audit", key: str = "c
         """,
         height=42,
     )
+
+
+_VERIF_BADGES = {
+    "Verified": ("verif-verified", "✓ Verified"),
+    "Unverified": ("verif-unverified", "? Unverified"),
+    "Outdated?": ("verif-outdated", "⚠ Possibly outdated"),
+}
+
+
+def render_benchmark_panel(audit_text: str):
+    """Render the audit's benchmark section (if any) as its own styled panel,
+    converting inline [Verified]/[Unverified]/[Outdated?] tags from the model
+    into colored badges so the user can see at a glance which benchmark claims
+    were confirmed via web search vs. drafted from training knowledge alone.
+    """
+    section = extract_benchmark_section(audit_text)
+    if not section:
+        return
+
+    def _sub(m):
+        cls, label = _VERIF_BADGES[m.group(1)]
+        return f'<span class="verif-tag {cls}">{label}</span>'
+
+    body_html = VERIFICATION_TAG_RE.sub(_sub, section)
+
+    with st.container(border=True):
+        st.markdown(
+            '<div class="benchmark-legend">'
+            '<span class="verif-tag verif-verified">✓ Verified</span>&nbsp;confirmed via web search&nbsp;&nbsp;·&nbsp;&nbsp;'
+            '<span class="verif-tag verif-unverified">? Unverified</span>&nbsp;drafted from training knowledge, not confirmed&nbsp;&nbsp;·&nbsp;&nbsp;'
+            '<span class="verif-tag verif-outdated">⚠ Possibly outdated</span>&nbsp;search suggests this may have changed'
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        st.markdown(body_html, unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------------------
@@ -706,6 +743,12 @@ elif st.session_state.step == "audit":
         # Fallback: show raw audit text
         st.markdown(st.session_state.audit_text)
 
+    # --- Benchmark section (shown separately since it's not part of the
+    # per-finding structured list above) ---
+    if st.session_state.benchmark != "none" and not st.session_state.edit_mode:
+        st.markdown("### " + bench_labels.get(st.session_state.benchmark, "Benchmarks"))
+        render_benchmark_panel(st.session_state.audit_text)
+
     # --- Action bar ---
     st.markdown("---")
     tally_str = tally_string(tally, language) if tally else ""
@@ -767,13 +810,7 @@ elif st.session_state.step == "deck_generating":
     # Extract benchmark text from audit
     benchmark_text = ""
     if st.session_state.benchmark != "none":
-        bench_match = re.search(
-            r"##\s+(?:Market|Competitor|Benchmark|Kıyaslama|Marktvergleich|Wettbewerbsvergleich).+",
-            st.session_state.audit_text,
-            re.DOTALL,
-        )
-        if bench_match:
-            benchmark_text = bench_match.group(0)
+        benchmark_text = extract_benchmark_section(st.session_state.audit_text)
 
     # Pages reviewed from screenshots
     pages = ", ".join(s["name"] for s in st.session_state.screenshots) if st.session_state.screenshots else ""
@@ -790,6 +827,8 @@ elif st.session_state.step == "deck_generating":
             target_users=st.session_state.target_users,
             pages_reviewed=pages,
             benchmark_text=benchmark_text,
+            competitors=st.session_state.competitors,
+            comp_screenshots=st.session_state.comp_screenshots,
             progress_callback=on_progress,
         )
         st.session_state.deck_bytes = deck_bytes

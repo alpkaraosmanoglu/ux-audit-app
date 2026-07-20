@@ -129,6 +129,17 @@ MODE_RULES = {
     ),
 }
 
+VERIFICATION_TAG_RULE = (
+    "Keep every claim in the section even if search couldn't confirm it — never "
+    "silently drop a claim. Instead, tag its verification status inline at the end "
+    "of the sentence or bullet, exactly as one of: `[Verified]` (confirmed via "
+    "web_search), `[Unverified]` (drafted from training knowledge, not confirmed or "
+    "search was inconclusive), or `[Outdated?]` (search suggests this may have "
+    "changed). Do not tag general/structural statements (e.g. Kano tier framing, "
+    "comparisons to the audited product) — only tag specific factual claims "
+    "(features, pricing, market share, launch dates, named capabilities)."
+)
+
 BENCHMARK_INSTRUCTIONS = {
     "none": "",
     "market": (
@@ -136,10 +147,9 @@ BENCHMARK_INSTRUCTIONS = {
         "After findings, add a Market Benchmark section. Draft 3–5 dominant patterns in "
         "the product's sector from your training knowledge first, then use the "
         "web_search tool with specific queries to validate they're current before "
-        "finalizing — update or remove anything you can't confirm. For each: name the "
-        "pattern, assign a Kano tier (basic / performance / delight), compare to the "
-        "audited product. Cite sources for anything specific (features, market share, "
-        "launch dates)."
+        "finalizing. For each: name the pattern, assign a Kano tier (basic / performance "
+        "/ delight), compare to the audited product. Cite sources for anything specific "
+        "(features, market share, launch dates). " + VERIFICATION_TAG_RULE
     ),
     "competitors": (
         "## Benchmarking — Competitors\n"
@@ -147,24 +157,25 @@ BENCHMARK_INSTRUCTIONS = {
         "draft what they do and 2–4 notable UX patterns from your training knowledge "
         "first, then use the web_search tool with specific queries (e.g. \"Cuvva car "
         "insurance app features 2026\", not \"insurance apps\") to validate those claims "
-        "before finalizing — update or remove anything you can't confirm, and never "
-        "invent competitor features. Cite sources for anything specific (features, "
-        "market share, launch dates). If screenshots or URLs were provided for a "
-        "competitor below, ground the analysis in that visual/structural evidence too — "
-        "it's the strongest signal when available, but its absence is not a blocker. "
-        "Assign a Kano tier to each pattern and compare to the audited product. End with "
-        "a 'What to steal, what to ignore' paragraph."
+        "before finalizing. Never invent competitor features outright — every claim must "
+        "come from training knowledge and/or search, never fabricated from nothing. Cite "
+        "sources for anything specific (features, market share, launch dates). If "
+        "screenshots or URLs were provided for a competitor below, ground the analysis in "
+        "that visual/structural evidence too — it's the strongest signal when available, "
+        "but its absence is not a blocker. Assign a Kano tier to each pattern and compare "
+        "to the audited product. End with a 'What to steal, what to ignore' paragraph. "
+        + VERIFICATION_TAG_RULE
     ),
     "both": (
         "## Benchmarking — Market + Competitors\n"
         "After findings, add: (1) Market section — 3–5 sector patterns with Kano tiers. "
         "(2) Competitor section — for each named competitor, draft from training "
         "knowledge first, then validate with the web_search tool using specific queries "
-        "before finalizing (update or remove unconfirmed claims, cite sources, never "
-        "invent features). Ground in any competitor screenshots/URLs provided below when "
-        "available — useful but not required. (3) Synthesis paragraph: which competitor "
-        "patterns are broad market moves vs. unique differentiators. End with 'What to "
-        "steal, what to ignore'."
+        "before finalizing (cite sources, never fabricate features from nothing). Ground "
+        "in any competitor screenshots/URLs provided below when available — useful but "
+        "not required. (3) Synthesis paragraph: which competitor patterns are broad "
+        "market moves vs. unique differentiators. End with 'What to steal, what to "
+        "ignore'. " + VERIFICATION_TAG_RULE
     ),
 }
 
@@ -453,6 +464,20 @@ def parse_findings(audit_md: str) -> list[dict]:
         })
 
     return findings
+
+
+BENCHMARK_SECTION_RE = re.compile(
+    r"##\s+(?:Market|Competitor|Benchmark|Kıyaslama|Marktvergleich|Wettbewerbsvergleich).+",
+    re.DOTALL,
+)
+
+VERIFICATION_TAG_RE = re.compile(r"\[(Verified|Unverified|Outdated\?)\]")
+
+
+def extract_benchmark_section(audit_md: str) -> str:
+    """Return the raw Markdown of the benchmark section, if present."""
+    match = BENCHMARK_SECTION_RE.search(audit_md)
+    return match.group(0) if match else ""
 
 
 def split_header(audit_md: str) -> str:
