@@ -154,6 +154,40 @@ section[data-testid="stSidebar"] { display: none !important; }
 .sev-minor { color: var(--sev-minor); background: var(--sev-minor-bg); }
 .sev-open { color: var(--sev-open); background: var(--sev-open-bg); }
 
+/* Benchmark verification tags */
+.verif-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    padding: 1px 7px;
+    border-radius: 3px;
+    font-family: 'DM Mono', monospace;
+    white-space: nowrap;
+}
+.verif-verified { color: var(--success); background: #ecfdf3; }
+.verif-unverified { color: var(--muted); background: #f4f4f5; }
+.verif-outdated { color: #b45309; background: #fffbeb; }
+.benchmark-panel {
+    border: 1.5px solid var(--border);
+    border-radius: 8px;
+    padding: 20px 22px;
+    margin-top: 8px;
+    background: var(--card-bg);
+}
+.benchmark-legend {
+    font-size: 11px;
+    color: var(--muted);
+    margin-bottom: 14px;
+    display: flex;
+    gap: 14px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
 /* Finding card */
 .finding-card {
     display: grid;
