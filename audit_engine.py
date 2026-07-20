@@ -133,28 +133,38 @@ BENCHMARK_INSTRUCTIONS = {
     "none": "",
     "market": (
         "## Benchmarking — Market\n"
-        "After findings, add a Market Benchmark section. Describe 3–5 dominant patterns "
-        "in the product's sector. For each: name the pattern, assign a Kano tier "
-        "(basic / performance / delight), compare to the audited product."
+        "After findings, add a Market Benchmark section. Draft 3–5 dominant patterns in "
+        "the product's sector from your training knowledge first, then use the "
+        "web_search tool with specific queries to validate they're current before "
+        "finalizing — update or remove anything you can't confirm. For each: name the "
+        "pattern, assign a Kano tier (basic / performance / delight), compare to the "
+        "audited product. Cite sources for anything specific (features, market share, "
+        "launch dates)."
     ),
     "competitors": (
         "## Benchmarking — Competitors\n"
-        "After findings, add a Competitor Benchmark section. Ground this ENTIRELY in "
-        "the competitor screenshots and/or URLs provided to you below — do not invent "
-        "or assume features you weren't shown. For each competitor: what they do, "
-        "2–4 notable UX patterns actually visible in the provided evidence with Kano "
-        "tiers, comparison to the audited product. If no competitor evidence (screenshots "
-        "or URLs) was provided for a named competitor, say so explicitly rather than "
-        "fabricating analysis. End with a 'What to steal, what to ignore' paragraph."
+        "After findings, add a Competitor Benchmark section. For each named competitor: "
+        "draft what they do and 2–4 notable UX patterns from your training knowledge "
+        "first, then use the web_search tool with specific queries (e.g. \"Cuvva car "
+        "insurance app features 2026\", not \"insurance apps\") to validate those claims "
+        "before finalizing — update or remove anything you can't confirm, and never "
+        "invent competitor features. Cite sources for anything specific (features, "
+        "market share, launch dates). If screenshots or URLs were provided for a "
+        "competitor below, ground the analysis in that visual/structural evidence too — "
+        "it's the strongest signal when available, but its absence is not a blocker. "
+        "Assign a Kano tier to each pattern and compare to the audited product. End with "
+        "a 'What to steal, what to ignore' paragraph."
     ),
     "both": (
         "## Benchmarking — Market + Competitors\n"
         "After findings, add: (1) Market section — 3–5 sector patterns with Kano tiers. "
-        "(2) Competitor section — per-competitor analysis grounded ENTIRELY in the "
-        "competitor screenshots and/or URLs provided below (do not invent features you "
-        "weren't shown — say so explicitly if no evidence was provided for a named "
-        "competitor). (3) Synthesis paragraph: which competitor patterns are broad "
-        "market moves vs. unique differentiators. End with 'What to steal, what to ignore'."
+        "(2) Competitor section — for each named competitor, draft from training "
+        "knowledge first, then validate with the web_search tool using specific queries "
+        "before finalizing (update or remove unconfirmed claims, cite sources, never "
+        "invent features). Ground in any competitor screenshots/URLs provided below when "
+        "available — useful but not required. (3) Synthesis paragraph: which competitor "
+        "patterns are broad market moves vs. unique differentiators. End with 'What to "
+        "steal, what to ignore'."
     ),
 }
 
@@ -330,8 +340,16 @@ def stream_audit(
     system_prompt: str,
     user_message: list[dict],
     model: str = DEFAULT_MODEL,
+    enable_web_search: bool = False,
 ):
     """Stream the audit generation, yielding text chunks.
+
+    When enable_web_search is True (benchmarking requested), the model can call
+    Anthropic's server-side web_search tool to validate benchmark claims against
+    training-data drafts, per the skill's "draft first, then validate" protocol.
+    The SDK's text_stream only surfaces text deltas, so tool-use/search-result
+    blocks interleaved in the stream are handled transparently — no extra
+    plumbing needed here.
 
     Yields (event_type, data) tuples:
         ('text', str)       — a chunk of response text
@@ -340,12 +358,19 @@ def stream_audit(
     """
     client = anthropic.Anthropic(api_key=api_key)
 
+    kwargs = {}
+    if enable_web_search:
+        kwargs["tools"] = [
+            {"type": "web_search_20250305", "name": "web_search", "max_uses": 8}
+        ]
+
     try:
         with client.messages.stream(
             model=model,
             max_tokens=8192,
             system=system_prompt,
             messages=[{"role": "user", "content": user_message}],
+            **kwargs,
         ) as stream:
             full_text = ""
             for text in stream.text_stream:
