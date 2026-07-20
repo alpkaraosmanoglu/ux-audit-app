@@ -87,7 +87,11 @@ Each finding must contain:
 4. **Heuristic** (optional, encouraged where it strengthens the finding)
 5. **Solution or Suggestions** — Solution when there's a clear right answer; \
 Suggestions (I, II, III) when 2–3 legitimate paths exist with different trade-offs.
-6. **Evidence reference** — which screenshot or URL the finding relates to.
+6. **Evidence reference** — which screenshot or URL the finding relates to. \
+In screenshots/hybrid mode, cite the EXACT numbered label given to you, in the \
+format "Screenshot N" (e.g. "Screenshot 2") — do not paraphrase or invent a \
+filename. In URLs mode, cite the exact URL analyzed. This reference is used to \
+programmatically attach the correct image to the finding, so precision here matters.
 
 ## Constraints
 - NEVER invent details not in the evidence.
@@ -135,16 +139,22 @@ BENCHMARK_INSTRUCTIONS = {
     ),
     "competitors": (
         "## Benchmarking — Competitors\n"
-        "After findings, add a Competitor Benchmark section. For each competitor: "
-        "what they do, 2–4 notable UX patterns with Kano tiers, comparison to the "
-        "audited product. End with a 'What to steal, what to ignore' paragraph."
+        "After findings, add a Competitor Benchmark section. Ground this ENTIRELY in "
+        "the competitor screenshots and/or URLs provided to you below — do not invent "
+        "or assume features you weren't shown. For each competitor: what they do, "
+        "2–4 notable UX patterns actually visible in the provided evidence with Kano "
+        "tiers, comparison to the audited product. If no competitor evidence (screenshots "
+        "or URLs) was provided for a named competitor, say so explicitly rather than "
+        "fabricating analysis. End with a 'What to steal, what to ignore' paragraph."
     ),
     "both": (
         "## Benchmarking — Market + Competitors\n"
         "After findings, add: (1) Market section — 3–5 sector patterns with Kano tiers. "
-        "(2) Competitor section — per-competitor analysis. (3) Synthesis paragraph: "
-        "which competitor patterns are broad market moves vs. unique differentiators. "
-        "End with 'What to steal, what to ignore'."
+        "(2) Competitor section — per-competitor analysis grounded ENTIRELY in the "
+        "competitor screenshots and/or URLs provided below (do not invent features you "
+        "weren't shown — say so explicitly if no evidence was provided for a named "
+        "competitor). (3) Synthesis paragraph: which competitor patterns are broad "
+        "market moves vs. unique differentiators. End with 'What to steal, what to ignore'."
     ),
 }
 
@@ -160,6 +170,7 @@ def build_system_prompt(
     audience: str = "",
     scope_notes: str = "",
     competitor_names: list[str] | None = None,
+    market_sector: str = "",
 ) -> str:
     """Assemble the full system prompt from skill methodology + user config."""
     ctx_lines = [f"## Product context\n- **Product name:** {product_name}"]
@@ -178,6 +189,8 @@ def build_system_prompt(
         ctx_lines.append(f"- **Audit audience:** {audience}")
     if scope_notes:
         ctx_lines.append(f"- **Scope notes:** {scope_notes}")
+    if market_sector:
+        ctx_lines.append(f"- **Market/sector to benchmark against:** {market_sector}")
     if competitor_names:
         ctx_lines.append(f"- **Named competitors:** {', '.join(competitor_names)}")
     product_context = "\n".join(ctx_lines)
@@ -209,6 +222,8 @@ def build_user_message(
     mode: str,
     screenshots: list[dict] | None = None,
     urls: list[str] | None = None,
+    competitors: list[dict] | None = None,
+    comp_screenshots: dict[int, list[dict]] | None = None,
 ) -> list[dict]:
     """Build the user message content array with text and images.
 
@@ -216,6 +231,9 @@ def build_user_message(
         mode: 'screenshots', 'urls', or 'hybrid'
         screenshots: list of dicts with 'name', 'data' (bytes), 'mime_type'
         urls: list of URL strings
+        competitors: list of dicts with 'name', 'url' — the benchmarking targets
+        comp_screenshots: dict mapping competitor index (0-based, matching the
+            `competitors` list) to a list of screenshot dicts for that competitor
     """
     content = []
 
@@ -224,7 +242,8 @@ def build_user_message(
             "type": "text",
             "text": (
                 f"I'm providing {len(screenshots)} screenshot(s) of the product. "
-                "Please analyze each one thoroughly."
+                "Please analyze each one thoroughly. When you cite evidence, use "
+                "the exact label 'Screenshot N' shown before each image below."
             ),
         })
         for i, shot in enumerate(screenshots, 1):
@@ -248,6 +267,45 @@ def build_user_message(
             "type": "text",
             "text": f"URLs to analyze:\n{url_list}",
         })
+
+    # Competitor benchmarking evidence — screenshots and/or URLs per competitor.
+    # Without this, competitor benchmarking sections are ungrounded guesses.
+    if competitors:
+        has_any_evidence = bool(comp_screenshots) or any(c.get("url") for c in competitors)
+        content.append({
+            "type": "text",
+            "text": (
+                "Competitor benchmarking evidence follows. Ground the Competitor "
+                "Benchmark section entirely in what's provided here — screenshots "
+                "and/or URLs per competitor. If a named competitor has no evidence "
+                "below, say so explicitly rather than inventing analysis."
+                if has_any_evidence else
+                "The following competitors were named, but no screenshots or URLs "
+                "were provided for them. Say so explicitly in the Competitor "
+                "Benchmark section rather than inventing analysis of their product."
+            ),
+        })
+        for idx, comp in enumerate(competitors):
+            name = comp.get("name") or f"Competitor {idx + 1}"
+            url = comp.get("url", "")
+            label = f"Competitor: {name}" + (f" — {url}" if url else "")
+            content.append({"type": "text", "text": label})
+
+            shots = (comp_screenshots or {}).get(idx, [])
+            for shot in shots:
+                b64 = base64.standard_b64encode(shot["data"]).decode("ascii")
+                content.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": shot.get("mime_type", "image/png"),
+                        "data": b64,
+                    },
+                })
+                content.append({
+                    "type": "text",
+                    "text": f"({name} screenshot — {shot['name']})",
+                })
 
     if not content:
         content.append({
@@ -350,6 +408,14 @@ def parse_findings(audit_md: str) -> list[dict]:
         if ev_match:
             evidence = ev_match.group(1).strip()
 
+        # Reliable screenshot lookup: the prompt instructs the model to cite
+        # "Screenshot N" exactly, so prefer this numeric index over fuzzy
+        # filename matching (which breaks whenever the model paraphrases).
+        screenshot_index = None
+        idx_match = re.search(r"[Ss]creenshot\s+(\d+)", evidence)
+        if idx_match:
+            screenshot_index = int(idx_match.group(1))
+
         findings.append({
             "severity": severity,
             "severity_raw": severity_raw,
@@ -357,10 +423,33 @@ def parse_findings(audit_md: str) -> list[dict]:
             "body": body,
             "heuristic": heuristic,
             "evidence": evidence,
+            "screenshot_index": screenshot_index,
             "full_text": part.strip(),
         })
 
     return findings
+
+
+def split_header(audit_md: str) -> str:
+    """Return the portion of the audit Markdown before the first finding heading.
+
+    Used to preserve the cover/overview section when findings are edited and
+    the audit text needs to be reassembled.
+    """
+    match = re.search(r"###\s+", audit_md)
+    return audit_md[: match.start()].rstrip() if match else audit_md.rstrip()
+
+
+def render_finding_markdown(finding: dict) -> str:
+    """Render a single finding dict back into its Markdown block."""
+    return f"### {finding['severity_raw']} — {finding['title']}\n\n{finding['body']}".rstrip()
+
+
+def compose_audit_markdown(header: str, findings: list[dict]) -> str:
+    """Reassemble the full audit Markdown from a header and an (edited) findings list."""
+    parts = [header] if header else []
+    parts.extend(render_finding_markdown(f) for f in findings)
+    return "\n\n".join(p for p in parts if p).strip() + "\n"
 
 
 def severity_tally(findings: list[dict]) -> dict[str, int]:
