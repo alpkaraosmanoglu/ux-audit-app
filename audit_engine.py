@@ -526,3 +526,91 @@ def tally_string(tally: dict[str, int], language: str = "English") -> str:
         if tally[sev] > 0:
             parts.append(f"{tally[sev]} {l[sev]}")
     return f"{total} findings" + (" · " + " · ".join(parts) if parts else "")
+
+
+# ---------------------------------------------------------------------------
+# Condensation for the deck — the written audit can be long; slides can't.
+# ---------------------------------------------------------------------------
+
+CONDENSE_SYSTEM_PROMPT = """\
+You are condensing a completed UX audit into presentation-ready copy for a \
+slide deck. Slides have hard space constraints — this is NOT a summary for \
+reading, it's shortened copy that must say the same thing in far fewer words. \
+The full written audit stays as-is elsewhere; only this condensed version \
+goes on slides.
+
+## Rules
+- Reproduce the EXACT same Markdown structure you receive: same finding \
+headings (`### [severity] — [title]`), same bold labels (**Finding:**, \
+**Suggestions:**/**Solution:**, **Evidence reference:**), same benchmark \
+heading if present (e.g. `## Market Benchmark`).
+- Copy the **Evidence reference** line for each finding VERBATIM, character \
+for character, unchanged. It is used to programmatically attach the correct \
+screenshot to each slide — paraphrasing, translating, or reformatting it \
+will break that.
+- Never change a finding's severity tag or title.
+- Shorten **Finding** to one tight sentence (roughly 15–25 words) that keeps \
+the specific observation and its consequence — cut background, keep the point.
+- Shorten **Suggestions**/**Solution** to one short sentence, or if there are \
+multiple options, to 2–3 short fragments — no more than ~20 words total.
+- Omit the **Heuristic** line unless it is essential; the deck has very \
+limited room for citations.
+- If a benchmark section is present, shorten each claim/bullet to roughly \
+half its original length while preserving its meaning.
+- CRITICAL: preserve every `[Verified]`, `[Unverified]`, or `[Outdated?]` tag \
+EXACTLY as written, attached to the same claim, at the end of the shortened \
+sentence. Never drop, move, or invent these tags.
+- Keep the output in {language}.
+- Do not add findings, do not remove findings, do not reorder them.
+- Output only the condensed Markdown — no preamble, no commentary.
+"""
+
+
+def condense_for_deck(
+    api_key: str,
+    findings: list[dict],
+    benchmark_md: str,
+    language: str,
+    model: str = DEFAULT_MODEL,
+) -> tuple[list[dict], str]:
+    """Condense findings + benchmark section into presentation-ready copy for
+    the slide deck, via a single non-streaming call. The written audit is
+    untouched — this only feeds deck_engine.
+
+    On any failure (API error, empty/unparseable response, or a finding count
+    mismatch that suggests the model dropped something), falls back to the
+    original findings/benchmark text unchanged. deck_engine's own word-count
+    truncation remains the hard safety net regardless, so a failed
+    condensation degrades to "longer slide text," never a broken deck.
+    """
+    if not findings:
+        return findings, benchmark_md
+
+    findings_md = "\n\n".join(render_finding_markdown(f) for f in findings)
+    input_parts = [findings_md]
+    if benchmark_md.strip():
+        input_parts.append(benchmark_md.strip())
+    input_md = "\n\n".join(input_parts)
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        response = client.messages.create(
+            model=model,
+            max_tokens=4096,
+            system=CONDENSE_SYSTEM_PROMPT.format(language=language),
+            messages=[{"role": "user", "content": input_md}],
+        )
+        condensed = "".join(
+            block.text for block in response.content if getattr(block, "type", None) == "text"
+        )
+    except Exception:
+        return findings, benchmark_md
+
+    condensed_findings = parse_findings(condensed)
+    if len(condensed_findings) != len(findings):
+        # The model dropped, merged, or split a finding — don't risk a
+        # mismatched deck. Fall back to the originals.
+        return findings, benchmark_md
+
+    condensed_benchmark = extract_benchmark_section(condensed) if benchmark_md.strip() else ""
+    return condensed_findings, condensed_benchmark
