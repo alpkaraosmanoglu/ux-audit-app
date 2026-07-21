@@ -116,16 +116,33 @@ MODE_RULES = {
     "screenshots": (
         "Visual audit (screenshots). Covers visual hierarchy, layout, attention flow, "
         "and interaction patterns. Full framework library available. Findings must be "
-        "grounded in what is visible in the provided screenshots."
+        "grounded in what is visible in the provided screenshots. Screenshots may be "
+        "grouped into named flows (e.g. \"Checkout\", \"Onboarding\") — where consecutive "
+        "screenshots share a flow, reason about the journey and the transitions between "
+        "them (drop-off points, lost context, broken continuity), not just each screen "
+        "in isolation."
     ),
     "urls": (
         "Structural audit (URLs). Covers IA, content hierarchy, copy, link structure. "
         "Visual hierarchy and interaction issues are out of scope. Do NOT reference "
-        "visual design, color, weight, or attention flow — you cannot see those."
+        "visual design, color, weight, or attention flow — you cannot see those. "
+        "You MUST use the web_fetch tool to actually retrieve each URL's live content "
+        "before analyzing it — never rely on training knowledge or assumptions about "
+        "what a page currently contains. Fetch every URL provided, and where pages "
+        "link to each other, follow the primary in-page navigation to understand the "
+        "flow between screens (e.g. a listing page into a detail or checkout page), "
+        "not just each URL as an isolated document. If a fetch fails or is blocked "
+        "(login wall, paywall, robots restriction), say so explicitly in the relevant "
+        "finding rather than inventing what the page might contain."
     ),
     "hybrid": (
         "Combined (URLs + screenshots). Covers structural and visual analysis together. "
-        "Findings are strongest when structural and visual evidence disagree."
+        "Findings are strongest when structural and visual evidence disagree. You MUST "
+        "use the web_fetch tool to retrieve the live content of every URL provided — "
+        "never rely on training knowledge or assumptions about a page's content. "
+        "Screenshots may be grouped into named flows — where consecutive screenshots "
+        "or linked URLs share a flow, reason about the journey between them, not just "
+        "each screen in isolation."
     ),
 }
 
@@ -259,11 +276,18 @@ def build_user_message(
     content = []
 
     if mode in ("screenshots", "hybrid") and screenshots:
+        has_flows = any(shot.get("flow_name") for shot in screenshots)
         content.append({
             "type": "text",
             "text": (
-                f"I'm providing {len(screenshots)} screenshot(s) of the product. "
-                "Please analyze each one thoroughly. When you cite evidence, use "
+                f"I'm providing {len(screenshots)} screenshot(s) of the product"
+                + (
+                    ", grouped into named flows where noted below. Where consecutive "
+                    "screenshots share a flow, reason about the journey and transitions "
+                    "between them, not just each screen in isolation. "
+                    if has_flows else ". "
+                )
+                + "Please analyze each one thoroughly. When you cite evidence, use "
                 "the exact label 'Screenshot N' shown before each image below."
             ),
         })
@@ -277,9 +301,12 @@ def build_user_message(
                     "data": b64,
                 },
             })
+            caption = f"Screenshot {i} — {shot['name']}"
+            if shot.get("flow_name"):
+                caption += f" (Flow: {shot['flow_name']})"
             content.append({
                 "type": "text",
-                "text": f"Screenshot {i} — {shot['name']}",
+                "text": caption,
             })
 
     if mode in ("urls", "hybrid") and urls:
@@ -352,12 +379,20 @@ def stream_audit(
     user_message: list[dict],
     model: str = DEFAULT_MODEL,
     enable_web_search: bool = False,
+    enable_web_fetch: bool = False,
+    web_fetch_max_uses: int = 12,
 ):
     """Stream the audit generation, yielding text chunks.
 
     When enable_web_search is True (benchmarking requested), the model can call
     Anthropic's server-side web_search tool to validate benchmark claims against
     training-data drafts, per the skill's "draft first, then validate" protocol.
+
+    When enable_web_fetch is True (URLs or hybrid mode), the model can call the
+    server-side web_fetch tool to actually retrieve each URL's live content
+    instead of guessing from training knowledge — required for URL-only audits
+    to be grounded in what the page currently contains.
+
     The SDK's text_stream only surfaces text deltas, so tool-use/search-result
     blocks interleaved in the stream are handled transparently — no extra
     plumbing needed here.
@@ -369,11 +404,15 @@ def stream_audit(
     """
     client = anthropic.Anthropic(api_key=api_key)
 
-    kwargs = {}
+    tools = []
     if enable_web_search:
-        kwargs["tools"] = [
-            {"type": "web_search_20250305", "name": "web_search", "max_uses": 8}
-        ]
+        tools.append({"type": "web_search_20250305", "name": "web_search", "max_uses": 8})
+    if enable_web_fetch:
+        tools.append({"type": "web_fetch_20250910", "name": "web_fetch", "max_uses": web_fetch_max_uses})
+
+    kwargs = {}
+    if tools:
+        kwargs["tools"] = tools
 
     try:
         with client.messages.stream(

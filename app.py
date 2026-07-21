@@ -63,7 +63,8 @@ DEFAULTS = {
     "benchmark": "none",
     "market_sector": "",
     "competitors": [{"name": "", "url": ""}],
-    "screenshots": [],       # list of {"name": str, "data": bytes, "mime_type": str}
+    "screenshot_flows": [{"name": "", "shots": []}],  # list of {"name": str, "shots": [{"name","data","mime_type"}]}
+    "screenshots": [],       # flat, ordered mirror of screenshot_flows — {"name","data","mime_type","flow_name"}
     "comp_screenshots": {},   # comp_idx -> list of {"name", "data", "mime_type"}
     "audits": {},            # language -> {"text", "header", "findings", "tally"}
     "active_language": "",   # which language's audit is currently shown/edited
@@ -80,6 +81,23 @@ for k, v in DEFAULTS.items():
 
 def go(step: str):
     st.session_state.step = step
+
+
+def sync_screenshots_from_flows():
+    """Flatten screenshot_flows into the flat, ordered st.session_state.screenshots
+    list that the rest of the app (evidence indexing, deck, PDF export) relies on.
+    Order is preserved across flows, so the numeric "Screenshot N" citation scheme
+    used throughout the app stays intact — flows only add a "flow_name" label on
+    top, they don't change indexing.
+    """
+    flat = []
+    for flow in st.session_state.screenshot_flows:
+        flow_name = (flow.get("name") or "").strip()
+        for shot in flow.get("shots", []):
+            entry = dict(shot)
+            entry["flow_name"] = flow_name
+            flat.append(entry)
+    st.session_state.screenshots = flat
 
 
 def current_audit() -> dict:
@@ -366,29 +384,57 @@ elif st.session_state.step == "config":
     if st.session_state.mode in ("screenshots", "hybrid"):
         st.markdown("---")
         st.markdown('<span class="section-label">Screenshots</span>', unsafe_allow_html=True)
-        st.caption("Upload as many screenshots as you need. They'll appear as numbered evidence in the audit.")
-
-        uploaded_files = st.file_uploader(
-            "Upload screenshots",
-            type=["png", "jpg", "jpeg", "webp"],
-            accept_multiple_files=True,
-            label_visibility="collapsed",
+        st.caption(
+            "Group screenshots into flows — e.g. \"Checkout\", \"Onboarding\" — so the "
+            "audit reasons about the journey between screens, not just each one in "
+            "isolation. Leave a flow's name blank if it's just standalone screens."
         )
 
-        if uploaded_files:
-            new_shots = []
-            for f in uploaded_files:
-                data = f.read()
-                mime = f.type or "image/png"
-                new_shots.append({"name": f.name, "data": data, "mime_type": mime})
-            st.session_state.screenshots = new_shots
+        for i, flow in enumerate(st.session_state.screenshot_flows):
+            with st.container(border=True):
+                flow_cols = st.columns([4, 1])
+                with flow_cols[0]:
+                    flow["name"] = st.text_input(
+                        f"Flow {i + 1} name",
+                        value=flow.get("name", ""),
+                        key=f"flow_name_{i}",
+                        placeholder=f"Flow {i + 1} name (optional) — e.g. Checkout",
+                        label_visibility="collapsed",
+                    )
+                with flow_cols[1]:
+                    if len(st.session_state.screenshot_flows) > 1:
+                        if st.button("Remove", key=f"rm_flow_{i}", use_container_width=True):
+                            st.session_state.screenshot_flows.pop(i)
+                            sync_screenshots_from_flows()
+                            st.rerun()
 
-        # Show thumbnails
-        if st.session_state.screenshots:
-            cols = st.columns(min(5, len(st.session_state.screenshots)))
-            for i, shot in enumerate(st.session_state.screenshots):
-                with cols[i % 5]:
-                    st.image(shot["data"], caption=shot["name"], use_container_width=True)
+                flow_files = st.file_uploader(
+                    f"Screenshots for flow {i + 1}",
+                    type=["png", "jpg", "jpeg", "webp"],
+                    accept_multiple_files=True,
+                    key=f"flow_shots_{i}",
+                    label_visibility="collapsed",
+                )
+                if flow_files:
+                    flow["shots"] = [
+                        {"name": f.name, "data": f.read(), "mime_type": f.type or "image/png"}
+                        for f in flow_files
+                    ]
+
+                if flow["shots"]:
+                    cols = st.columns(min(5, len(flow["shots"])))
+                    for j, shot in enumerate(flow["shots"]):
+                        with cols[j % 5]:
+                            st.image(shot["data"], caption=shot["name"], use_container_width=True)
+
+        if st.button("+ Add another flow", type="primary", use_container_width=True):
+            st.session_state.screenshot_flows.append({"name": "", "shots": []})
+            st.rerun()
+
+        sync_screenshots_from_flows()
+        n_shots_total = len(st.session_state.screenshots)
+        if n_shots_total:
+            st.caption(f"{n_shots_total} screenshot{'s' if n_shots_total != 1 else ''} added across {len(st.session_state.screenshot_flows)} flow(s).")
 
     # --- Benchmarking ---
     st.markdown("---")
@@ -560,6 +606,8 @@ elif st.session_state.step == "generating":
                 system_prompt=system_prompt,
                 user_message=user_message,
                 enable_web_search=(benchmark != "none"),
+                enable_web_fetch=(mode in ("urls", "hybrid")),
+                web_fetch_max_uses=max(len(urls or []) + 4, 8),
             ):
                 if event_type == "text":
                     full_text += data
