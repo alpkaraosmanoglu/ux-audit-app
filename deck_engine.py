@@ -107,6 +107,7 @@ LABELS = {
         "screens_reviewed": "Screens reviewed",
         "legend": "Verified via web search \u00b7 Unverified — drafted, not confirmed \u00b7 Possibly outdated",
         "not_specified": "Not specified",
+        "suggested_ui": "Suggested UI",
     },
     "Türkçe": {
         "report_title": "UX Denetim Raporu",
@@ -134,6 +135,7 @@ LABELS = {
         "screens_reviewed": "İncelenen ekranlar",
         "legend": "Web aramasıyla doğrulandı \u00b7 Doğrulanmadı — eğitim verisinden yazıldı \u00b7 Güncelliğini yitirmiş olabilir",
         "not_specified": "Belirtilmedi",
+        "suggested_ui": "Önerilen Arayüz",
     },
     "Deutsch": {
         "report_title": "UX-Audit-Bericht",
@@ -161,6 +163,7 @@ LABELS = {
         "screens_reviewed": "Geprüfte Bildschirme",
         "legend": "Per Websuche bestätigt \u00b7 Unbestätigt — aus Trainingswissen verfasst \u00b7 Möglicherweise veraltet",
         "not_specified": "Nicht angegeben",
+        "suggested_ui": "Vorgeschlagene UI",
     },
 }
 
@@ -541,14 +544,193 @@ def _split_finding_body(body_text: str, labels: dict):
     return blocks
 
 
+# ---------------------------------------------------------------------------
+# UI mockup wireframes — a small, deliberately sketch-like rendering of a
+# suggested UI element (e.g. "add a confirmation pop-up"), drawn with plain
+# shapes/text so the deck can visualize the fix, not just describe it in
+# prose. These only ever appear on finding slides, sourced from a finding's
+# optional `ui_mockup` dict (see audit_engine.parse_ui_mockup).
+# ---------------------------------------------------------------------------
+
+def _mockup_modal(slide, x, y, w, h, mockup):
+    card_w, card_h = w * 0.72, h * 0.64
+    cx, cy = x + (w - card_w) / 2, y + (h - card_h) / 2
+    _rect(slide, cx, cy, card_w, card_h, fill=WHITE, line=BORDER, line_w=Pt(1.25),
+          shape_type=MSO_SHAPE.ROUNDED_RECTANGLE)
+    pad = Inches(0.14)
+    tx, ty = cx + pad, cy + pad
+    tw = card_w - 2 * pad
+    title = mockup.get("title", "")
+    body = mockup.get("body", "")
+    if title:
+        _text(slide, tx, ty, tw, Inches(0.28), title, 10.5, DARK, bold=True, font=FONT_BODY)
+        ty += Inches(0.3)
+    if body:
+        _text(slide, tx, ty, tw, cy + card_h - ty - Inches(0.42), body, 9, BODY_TEXT,
+              font=FONT_BODY, line_spacing=1.15)
+
+    btn_y = cy + card_h - Inches(0.38)
+    bx = cx + card_w - pad
+    primary = mockup.get("primary")
+    secondary = mockup.get("secondary")
+    if primary:
+        bw = Inches(0.1 * len(primary) + 0.3)
+        bx -= bw
+        _rect(slide, bx, btn_y, bw, Inches(0.26), fill=BLUE, line=None,
+              shape_type=MSO_SHAPE.ROUNDED_RECTANGLE)
+        _text(slide, bx, btn_y, bw, Inches(0.26), primary, 8, WHITE, bold=True, font=FONT_BODY,
+              align=PP_ALIGN.CENTER, anchor=MSO_ANCHOR.MIDDLE)
+        bx -= Inches(0.1)
+    if secondary:
+        bw = Inches(0.1 * len(secondary) + 0.3)
+        bx -= bw
+        _rect(slide, bx, btn_y, bw, Inches(0.26), fill=None, line=GREY, line_w=Pt(1),
+              shape_type=MSO_SHAPE.ROUNDED_RECTANGLE)
+        _text(slide, bx, btn_y, bw, Inches(0.26), secondary, 8, GREY, font=FONT_BODY,
+              align=PP_ALIGN.CENTER, anchor=MSO_ANCHOR.MIDDLE)
+
+
+def _mockup_sticky_bar(slide, x, y, w, h, mockup):
+    bar_h = min(Inches(0.6), h * 0.34)
+    by = y + h - bar_h
+    _rect(slide, x, by, w, bar_h, fill=DARK, line=None)
+    pad = Inches(0.14)
+    body = mockup.get("body") or mockup.get("title", "")
+    primary = mockup.get("primary")
+    text_w = w - 2 * pad
+    if primary:
+        bw = Inches(0.1 * len(primary) + 0.3)
+        text_w -= bw + Inches(0.14)
+        bbx = x + w - pad - bw
+        bby = by + (bar_h - Inches(0.28)) / 2
+        _rect(slide, bbx, bby, bw, Inches(0.28), fill=BLUE, line=None,
+              shape_type=MSO_SHAPE.ROUNDED_RECTANGLE)
+        _text(slide, bbx, bby, bw, Inches(0.28), primary, 8.5, WHITE, bold=True, font=FONT_BODY,
+              align=PP_ALIGN.CENTER, anchor=MSO_ANCHOR.MIDDLE)
+    if body:
+        _text(slide, x + pad, by, text_w, bar_h, body, 9.5, WHITE, font=FONT_BODY,
+              anchor=MSO_ANCHOR.MIDDLE, line_spacing=1.1)
+
+
+def _mockup_tooltip(slide, x, y, w, h, mockup):
+    el_w, el_h = Inches(0.9), Inches(0.32)
+    ex, ey = x + Inches(0.3), y + h - el_h - Inches(0.3)
+    _rect(slide, ex, ey, el_w, el_h, fill=WHITE, line=GREY, line_w=Pt(1),
+          shape_type=MSO_SHAPE.ROUNDED_RECTANGLE)
+
+    body = mockup.get("body", "")
+    bubble_w = min(w - Inches(0.6), Inches(2.6))
+    bubble_h = Inches(0.55)
+    bx, by = ex, ey - bubble_h - Inches(0.12)
+    _rect(slide, bx, by, bubble_w, bubble_h, fill=DARK, line=None,
+          shape_type=MSO_SHAPE.ROUNDED_RECTANGLE)
+    _text(slide, bx + Inches(0.1), by, bubble_w - Inches(0.2), bubble_h, body, 9, WHITE,
+          font=FONT_BODY, anchor=MSO_ANCHOR.MIDDLE, line_spacing=1.1)
+    tri = _rect(slide, bx + Inches(0.2), by + bubble_h - Inches(0.02), Inches(0.14), Inches(0.09),
+                fill=DARK, line=None, shape_type=MSO_SHAPE.ISOSCELES_TRIANGLE)
+    tri.rotation = 180
+
+
+def _mockup_toast(slide, x, y, w, h, mockup):
+    toast_w = min(w * 0.62, Inches(3.0))
+    toast_h = Inches(0.55)
+    tx, ty = x + w - toast_w - Inches(0.25), y + Inches(0.25)
+    _rect(slide, tx, ty, toast_w, toast_h, fill=DARK, line=None,
+          shape_type=MSO_SHAPE.ROUNDED_RECTANGLE)
+    body = mockup.get("body") or mockup.get("title", "")
+    _text(slide, tx + Inches(0.14), ty, toast_w - Inches(0.28), toast_h, body, 9, WHITE,
+          font=FONT_BODY, anchor=MSO_ANCHOR.MIDDLE, line_spacing=1.1)
+
+
+def _mockup_inline_validation(slide, x, y, w, h, mockup):
+    field_w = min(w - Inches(0.6), Inches(3.4))
+    fx = x + (w - field_w) / 2
+    fy = y + h * 0.32
+    title = mockup.get("title", "")
+    if title:
+        _text(slide, fx, fy - Inches(0.3), field_w, Inches(0.26), title, 9.5, BODY_TEXT,
+              bold=True, font=FONT_BODY)
+    err_color = SEVERITY["major"][0]
+    _rect(slide, fx, fy, field_w, Inches(0.36), fill=WHITE, line=err_color, line_w=Pt(1.5),
+          shape_type=MSO_SHAPE.ROUNDED_RECTANGLE)
+    body = mockup.get("body", "")
+    if body:
+        _text(slide, fx, fy + Inches(0.42), field_w, Inches(0.3), "\u26A0 " + body, 8.5,
+              err_color, font=FONT_BODY, line_spacing=1.1)
+
+
+def _mockup_dropdown(slide, x, y, w, h, mockup):
+    field_w = min(w - Inches(0.6), Inches(2.8))
+    fx = x + (w - field_w) / 2
+    fy = y + Inches(0.2)
+    title = mockup.get("title") or mockup.get("body", "")
+    _rect(slide, fx, fy, field_w, Inches(0.34), fill=WHITE, line=GREY, line_w=Pt(1),
+          shape_type=MSO_SHAPE.ROUNDED_RECTANGLE)
+    _text(slide, fx + Inches(0.1), fy, field_w - Inches(0.3), Inches(0.34), title or "\u2013",
+          9, DARK, font=FONT_BODY, anchor=MSO_ANCHOR.MIDDLE)
+    _text(slide, fx + field_w - Inches(0.22), fy, Inches(0.2), Inches(0.34), "\u25BE", 9, GREY,
+          font=FONT_BODY, align=PP_ALIGN.CENTER, anchor=MSO_ANCHOR.MIDDLE)
+
+    menu_y = fy + Inches(0.36)
+    row_h = Inches(0.3)
+    options = [o for o in (mockup.get("primary"), mockup.get("secondary")) if o]
+    if not options:
+        options = ["Option A", "Option B"]
+    menu_h = row_h * len(options)
+    _rect(slide, fx, menu_y, field_w, menu_h, fill=WHITE, line=BORDER, line_w=Pt(1))
+    ry = menu_y
+    for i, opt in enumerate(options):
+        if i == 0:
+            _rect(slide, fx, ry, field_w, row_h, fill=BLUE_TINT, line=None)
+        _text(slide, fx + Inches(0.1), ry, field_w - Inches(0.2), row_h, opt, 8.5,
+              BLUE if i == 0 else BODY_TEXT, font=FONT_BODY, anchor=MSO_ANCHOR.MIDDLE)
+        ry += row_h
+
+
+_MOCKUP_BUILDERS = {
+    "modal": _mockup_modal,
+    "sticky_bar": _mockup_sticky_bar,
+    "tooltip": _mockup_tooltip,
+    "toast": _mockup_toast,
+    "inline_validation": _mockup_inline_validation,
+    "dropdown": _mockup_dropdown,
+}
+
+
+def _draw_ui_mockup(slide, x, y, w, h, mockup, label):
+    """Draw a wireframe-style visual of a suggested UI element inside the
+    given box. Deliberately distinguished from _framed_picture's real-
+    screenshot treatment (solid white card) via a dimmed grey "page" backdrop
+    plus a small corner tag, so it reads as a sketch, not a screenshot."""
+    builder = _MOCKUP_BUILDERS.get(mockup.get("pattern") if mockup else None)
+    if builder is None:
+        return
+    _rect(slide, x, y, w, h, fill=WHITE, line=BORDER, line_w=Pt(1))
+    pad = Inches(0.12)
+    inner_x, inner_y = x + pad, y + pad
+    inner_w, inner_h = w - 2 * pad, h - 2 * pad
+    _rect(slide, inner_x, inner_y, inner_w, inner_h, fill=RGBColor(0xEC, 0xEA, 0xE6), line=None)
+
+    tag_w, tag_h = Inches(1.15), Inches(0.24)
+    tag_x, tag_y = x + w - tag_w - Inches(0.08), y + Inches(0.08)
+    _rect(slide, tag_x, tag_y, tag_w, tag_h, fill=DARK, line=None,
+          shape_type=MSO_SHAPE.ROUNDED_RECTANGLE)
+    _text(slide, tag_x, tag_y, tag_w, tag_h, label.upper(), 7.5, WHITE, bold=True,
+          font=FONT_BODY, align=PP_ALIGN.CENTER, anchor=MSO_ANCHOR.MIDDLE, spacing=0.4)
+
+    builder(slide, inner_x, inner_y, inner_w, inner_h, mockup)
+
+
 def _build_finding_slide(prs, labels, product_name, finding, shot, index, total, page_num, total_pages):
     slide = add_slide(prs, LAYOUT_BLANK)
     _rect(slide, 0, 0, SLIDE_W, SLIDE_H, fill=WHITE)
     fg, bg, glyph = SEVERITY.get(finding["severity"], SEVERITY["open"])
     _accent_bar(slide, fg)
 
+    mockup = finding.get("ui_mockup")
+    has_mockup = bool(mockup and mockup.get("pattern") in _MOCKUP_BUILDERS)
     has_shot = shot is not None
-    left_w = Inches(6.3) if has_shot else Inches(11.9)
+    left_w = Inches(6.3) if (has_shot or has_mockup) else Inches(11.9)
 
     _badge(slide, MARGIN, Inches(0.5), finding["severity_raw"].upper(), fg, bg, size=10.5)
     _text(slide, SLIDE_W - MARGIN - Inches(1.4), Inches(0.5), Inches(1.4), Inches(0.3),
@@ -582,12 +764,21 @@ def _build_finding_slide(prs, labels, product_name, finding, shot, index, total,
               finding["heuristic"], 10.5, GREY, italic=True, font=FONT_BODY, anchor=MSO_ANCHOR.MIDDLE,
               line_spacing=1.05)
 
-    if has_shot:
-        fw, fh = Inches(5.6), Inches(5.35)
+    if has_shot or has_mockup:
+        fw = Inches(5.6)
         fx, fy = SLIDE_W - MARGIN - fw, Inches(1.0)
-        _framed_picture(slide, shot["data"], fx, fy, fw, fh, ext=_ext_from_mime(shot.get("mime_type")))
-    else:
-        fw, fh = Inches(0), Inches(0)
+        if has_shot and has_mockup:
+            shot_h, gap, mock_h = Inches(3.15), Inches(0.16), Inches(2.04)
+            _framed_picture(slide, shot["data"], fx, fy, fw, shot_h,
+                             ext=_ext_from_mime(shot.get("mime_type")))
+            _draw_ui_mockup(slide, fx, fy + shot_h + gap, fw, mock_h, mockup,
+                             labels.get("suggested_ui", "Suggested UI"))
+        elif has_shot:
+            fh = Inches(5.35)
+            _framed_picture(slide, shot["data"], fx, fy, fw, fh, ext=_ext_from_mime(shot.get("mime_type")))
+        else:
+            fh = Inches(5.35)
+            _draw_ui_mockup(slide, fx, fy, fw, fh, mockup, labels.get("suggested_ui", "Suggested UI"))
 
     _logo(slide)
     _footer(slide, product_name, page_num, total_pages)
