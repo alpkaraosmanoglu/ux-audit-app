@@ -9,13 +9,11 @@ Methodology:     ux-audit-skill (written audit) + ux-audit-deck-skill (deck)
 """
 
 import io
-import json
 import re
 import time
 from datetime import datetime
 
 import streamlit as st
-import streamlit.components.v1 as components
 
 from styles import CUSTOM_CSS
 from audit_engine import (
@@ -31,6 +29,7 @@ from audit_engine import (
     tally_string,
 )
 from deck_engine import generate_deck
+from pdf_engine import generate_audit_pdf
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -80,33 +79,6 @@ for k, v in DEFAULTS.items():
 
 def go(step: str):
     st.session_state.step = step
-
-
-def copy_to_clipboard_button(text: str, label: str = "Copy audit", key: str = "copy"):
-    """A one-click copy button. Streamlit has no native clipboard API, so this
-    renders a small HTML/JS button in an iframe via components.html — a
-    documented simplification versus a native button, but works reliably
-    across browsers without extra dependencies.
-    """
-    safe_text = json.dumps(text)
-    components.html(
-        f"""
-        <button id="{key}" style="
-            font-family: 'DM Sans', sans-serif; font-size: 14px; font-weight: 600;
-            padding: 8px 16px; border-radius: 0; border: 1.5px solid #e4e4e7;
-            background: #ffffff; color: #0b0b0c; cursor: pointer; width: 100%;
-        ">{label}</button>
-        <script>
-        const btn = document.getElementById("{key}");
-        btn.addEventListener("click", function() {{
-            navigator.clipboard.writeText({safe_text});
-            btn.innerText = "Copied ✓";
-            setTimeout(() => btn.innerText = "{label}", 1500);
-        }});
-        </script>
-        """,
-        height=42,
-    )
 
 
 _VERIF_BADGES = {
@@ -760,7 +732,23 @@ elif st.session_state.step == "audit":
             go("generating")
             st.rerun()
     with action_cols[1]:
-        copy_to_clipboard_button(st.session_state.audit_text, label="Copy audit", key="copy_audit_btn")
+        pdf_bytes = generate_audit_pdf(
+            product_name=st.session_state.product_name,
+            language=language,
+            mode=st.session_state.mode,
+            benchmark=st.session_state.benchmark,
+            findings=findings,
+            tally=tally,
+            screenshots=st.session_state.screenshots,
+            audit_text=st.session_state.audit_text,
+        )
+        st.download_button(
+            "Download PDF",
+            data=pdf_bytes,
+            file_name=f"ux_audit_{st.session_state.product_name.lower().replace(' ', '_')}.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+        )
     with action_cols[2]:
         st.download_button(
             "Download .md",
