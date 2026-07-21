@@ -11,6 +11,7 @@ Methodology:     ux-audit-skill (written audit) + ux-audit-deck-skill (deck)
 import io
 import re
 import time
+import zipfile
 from datetime import datetime
 
 import streamlit as st
@@ -21,6 +22,7 @@ from audit_engine import (
     build_system_prompt,
     build_user_message,
     compose_audit_markdown,
+    condense_for_deck,
     extract_benchmark_section,
     parse_findings,
     severity_tally,
@@ -63,12 +65,11 @@ DEFAULTS = {
     "competitors": [{"name": "", "url": ""}],
     "screenshots": [],       # list of {"name": str, "data": bytes, "mime_type": str}
     "comp_screenshots": {},   # comp_idx -> list of {"name", "data", "mime_type"}
-    "audit_text": "",
-    "audit_header": "",
-    "audit_findings": [],
-    "audit_tally": {},
+    "audits": {},            # language -> {"text", "header", "findings", "tally"}
+    "active_language": "",   # which language's audit is currently shown/edited
+    "regenerate_language": None,  # set by "Regenerate" to redo just one language
     "edit_mode": False,
-    "deck_bytes": None,
+    "decks": {},             # language -> pptx bytes
     "generating": False,
     "deck_generating": False,
 }
@@ -79,6 +80,18 @@ for k, v in DEFAULTS.items():
 
 def go(step: str):
     st.session_state.step = step
+
+
+def current_audit() -> dict:
+    """The active language's working audit state (header/text/findings/tally).
+    Findings is the same list object stored in session_state.audits, so
+    in-place edits (severity/title/body changes, add/delete) persist
+    automatically without an explicit save step.
+    """
+    lang = st.session_state.active_language
+    if lang not in st.session_state.audits:
+        st.session_state.audits[lang] = {"text": "", "header": "", "findings": [], "tally": {}}
+    return st.session_state.audits[lang]
 
 
 _VERIF_BADGES = {
@@ -493,30 +506,22 @@ elif st.session_state.step == "generating":
     st.markdown('<div class="screen-kicker">Step 4 of 6 — Generation</div>', unsafe_allow_html=True)
     st.markdown("## Generating your audit…")
 
-    # Build prompt for the first selected language
-    language = st.session_state.language[0] if st.session_state.language else "English"
+    # Regenerate re-does just one language; a fresh run does every selected language.
+    langs_to_generate = (
+        [st.session_state.regenerate_language]
+        if st.session_state.regenerate_language
+        else list(st.session_state.language)
+    )
+
     mode = st.session_state.mode
     benchmark = st.session_state.benchmark
 
     competitor_names = [c["name"] for c in st.session_state.competitors if c.get("name")]
     active_competitors = st.session_state.competitors if benchmark in ("competitors", "both") else None
 
-    system_prompt = build_system_prompt(
-        language=language,
-        mode=mode,
-        benchmark=benchmark,
-        product_name=st.session_state.product_name,
-        client_name=st.session_state.client_name,
-        industry=st.session_state.industry,
-        target_users=st.session_state.target_users,
-        audience=st.session_state.audience,
-        scope_notes=st.session_state.scope_notes,
-        competitor_names=competitor_names if competitor_names else None,
-        market_sector=st.session_state.market_sector if benchmark in ("market", "both") else "",
-    )
-
     urls = [u.strip() for u in st.session_state.urls_text.split("\n") if u.strip()] if st.session_state.urls_text else None
 
+    # Evidence (screenshots/URLs/competitor material) doesn't depend on language.
     user_message = build_user_message(
         mode=mode,
         screenshots=st.session_state.screenshots if mode in ("screenshots", "hybrid") else None,
@@ -525,44 +530,65 @@ elif st.session_state.step == "generating":
         comp_screenshots=st.session_state.comp_screenshots if active_competitors else None,
     )
 
-    # Status line
-    n_shots = len(st.session_state.screenshots)
     status_placeholder = st.empty()
     progress_bar = st.progress(0)
     findings_container = st.container()
 
-    # Stream the audit
-    full_text = ""
     error_msg = None
+    n_langs = len(langs_to_generate)
 
-    with findings_container:
-        text_area = st.empty()
-        for event_type, data in stream_audit(
-            api_key=st.session_state.api_key,
-            system_prompt=system_prompt,
-            user_message=user_message,
-            enable_web_search=(benchmark != "none"),
-        ):
-            if event_type == "text":
-                full_text += data
-                # Update progress based on content
-                finding_count = full_text.count("###")
-                progress_val = min(0.95, finding_count * 0.15 + 0.1)
-                progress_bar.progress(progress_val)
-                status_placeholder.markdown(
-                    f'<div style="display:flex;align-items:center;gap:8px;font-size:13px;color:#71717a;">'
-                    f'<span class="spinner-dot"></span>'
-                    f"Analyzing… {finding_count} finding(s) so far"
-                    f"</div>",
-                    unsafe_allow_html=True,
-                )
-                text_area.markdown(full_text)
-            elif event_type == "done":
-                full_text = data
-                progress_bar.progress(1.0)
-                status_placeholder.markdown("**Generation complete.**")
-            elif event_type == "error":
-                error_msg = data
+    for lang_i, language in enumerate(langs_to_generate):
+        system_prompt = build_system_prompt(
+            language=language,
+            mode=mode,
+            benchmark=benchmark,
+            product_name=st.session_state.product_name,
+            client_name=st.session_state.client_name,
+            industry=st.session_state.industry,
+            target_users=st.session_state.target_users,
+            audience=st.session_state.audience,
+            scope_notes=st.session_state.scope_notes,
+            competitor_names=competitor_names if competitor_names else None,
+            market_sector=st.session_state.market_sector if benchmark in ("market", "both") else "",
+        )
+
+        full_text = ""
+        with findings_container:
+            text_area = st.empty()
+            for event_type, data in stream_audit(
+                api_key=st.session_state.api_key,
+                system_prompt=system_prompt,
+                user_message=user_message,
+                enable_web_search=(benchmark != "none"),
+            ):
+                if event_type == "text":
+                    full_text += data
+                    finding_count = full_text.count("###")
+                    progress_val = min(0.95, (lang_i + min(0.9, finding_count * 0.15 + 0.1)) / n_langs)
+                    progress_bar.progress(progress_val)
+                    status_placeholder.markdown(
+                        f'<div style="display:flex;align-items:center;gap:8px;font-size:13px;color:#71717a;">'
+                        f'<span class="spinner-dot"></span>'
+                        f"Analyzing ({language})… {finding_count} finding(s) so far"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+                    text_area.markdown(full_text)
+                elif event_type == "done":
+                    full_text = data
+                elif event_type == "error":
+                    error_msg = data
+
+        if error_msg:
+            break
+
+        findings = parse_findings(full_text)
+        st.session_state.audits[language] = {
+            "text": full_text,
+            "header": split_header(full_text),
+            "findings": findings,
+            "tally": severity_tally(findings),
+        }
 
     if error_msg:
         st.error(error_msg)
@@ -570,11 +596,13 @@ elif st.session_state.step == "generating":
             go("config")
             st.rerun()
     else:
-        # Parse findings
-        st.session_state.audit_text = full_text
-        st.session_state.audit_header = split_header(full_text)
-        st.session_state.audit_findings = parse_findings(full_text)
-        st.session_state.audit_tally = severity_tally(st.session_state.audit_findings)
+        progress_bar.progress(1.0)
+        status_placeholder.markdown("**Generation complete.**")
+
+        if st.session_state.regenerate_language:
+            st.session_state.regenerate_language = None
+        else:
+            st.session_state.active_language = langs_to_generate[0]
         st.session_state.edit_mode = False
 
         time.sleep(0.5)
@@ -588,11 +616,31 @@ elif st.session_state.step == "generating":
 elif st.session_state.step == "audit":
     st.markdown('<div class="screen-kicker">Step 5 of 6 — Deliverable</div>', unsafe_allow_html=True)
 
-    language = st.session_state.language[0] if st.session_state.language else "English"
     mode_labels = {"screenshots": "Screenshots", "urls": "URLs only", "hybrid": "Hybrid"}
     bench_labels = {"none": "No benchmarking", "market": "Market", "competitors": "Competitors", "both": "Market + Competitors"}
 
+    available_langs = list(st.session_state.audits.keys())
+    if st.session_state.active_language not in available_langs and available_langs:
+        st.session_state.active_language = available_langs[0]
+    language = st.session_state.active_language or (st.session_state.language[0] if st.session_state.language else "English")
+
     st.markdown(f"## UX Audit — {st.session_state.product_name}")
+
+    if len(available_langs) > 1:
+        chosen = st.radio(
+            "Language",
+            available_langs,
+            index=available_langs.index(language),
+            horizontal=True,
+            label_visibility="collapsed",
+            key="lang_switcher",
+        )
+        if chosen != st.session_state.active_language:
+            st.session_state.active_language = chosen
+            st.session_state.edit_mode = False
+            st.rerun()
+        language = chosen
+
     st.caption(
         f"{mode_labels.get(st.session_state.mode, st.session_state.mode)} mode · "
         f"{language} · "
@@ -600,8 +648,10 @@ elif st.session_state.step == "audit":
         f"Generated {datetime.now().strftime('%b %d, %Y')}"
     )
 
-    findings = st.session_state.audit_findings
-    tally = st.session_state.audit_tally
+    cur = current_audit()
+    findings = cur["findings"]
+    tally = cur["tally"]
+    lang_suffix = f"_{language.lower()}" if len(available_langs) > 1 else ""
 
     def resolve_screenshot(f: dict):
         """Look up a finding's screenshot. Prefers the reliable numeric
@@ -628,12 +678,10 @@ elif st.session_state.step == "audit":
         if st.button(edit_label, use_container_width=True):
             st.session_state.edit_mode = not st.session_state.edit_mode
             if not st.session_state.edit_mode:
-                # Leaving edit mode: reassemble audit_text + tally from the
+                # Leaving edit mode: reassemble text + tally from the
                 # (possibly edited) findings list.
-                st.session_state.audit_text = compose_audit_markdown(
-                    st.session_state.audit_header, st.session_state.audit_findings
-                )
-                st.session_state.audit_tally = severity_tally(st.session_state.audit_findings)
+                cur["text"] = compose_audit_markdown(cur["header"], cur["findings"])
+                cur["tally"] = severity_tally(cur["findings"])
             st.rerun()
 
     if st.session_state.edit_mode:
@@ -713,13 +761,13 @@ elif st.session_state.step == "audit":
             st.divider()
     else:
         # Fallback: show raw audit text
-        st.markdown(st.session_state.audit_text)
+        st.markdown(cur["text"])
 
     # --- Benchmark section (shown separately since it's not part of the
     # per-finding structured list above) ---
     if st.session_state.benchmark != "none" and not st.session_state.edit_mode:
         st.markdown("### " + bench_labels.get(st.session_state.benchmark, "Benchmarks"))
-        render_benchmark_panel(st.session_state.audit_text)
+        render_benchmark_panel(cur["text"])
 
     # --- Action bar ---
     st.markdown("---")
@@ -729,6 +777,7 @@ elif st.session_state.step == "audit":
     action_cols = st.columns([1, 1, 1, 1, 1])
     with action_cols[0]:
         if st.button("Regenerate", type="secondary"):
+            st.session_state.regenerate_language = language
             go("generating")
             st.rerun()
     with action_cols[1]:
@@ -740,29 +789,27 @@ elif st.session_state.step == "audit":
             findings=findings,
             tally=tally,
             screenshots=st.session_state.screenshots,
-            audit_text=st.session_state.audit_text,
+            audit_text=cur["text"],
         )
         st.download_button(
             "Download PDF",
             data=pdf_bytes,
-            file_name=f"ux_audit_{st.session_state.product_name.lower().replace(' ', '_')}.pdf",
+            file_name=f"ux_audit_{st.session_state.product_name.lower().replace(' ', '_')}{lang_suffix}.pdf",
             mime="application/pdf",
             use_container_width=True,
         )
     with action_cols[2]:
         st.download_button(
             "Download .md",
-            data=st.session_state.audit_text,
-            file_name=f"ux_audit_{st.session_state.product_name.lower().replace(' ', '_')}.md",
+            data=cur["text"],
+            file_name=f"ux_audit_{st.session_state.product_name.lower().replace(' ', '_')}{lang_suffix}.md",
             mime="text/markdown",
         )
     with action_cols[3]:
         if st.button("Generate deck →", type="primary"):
-            # Ensure any pending edits are folded into audit_text before deck generation.
-            st.session_state.audit_text = compose_audit_markdown(
-                st.session_state.audit_header, st.session_state.audit_findings
-            )
-            st.session_state.audit_tally = severity_tally(st.session_state.audit_findings)
+            # Ensure any pending edits are folded into the working text before deck generation.
+            cur["text"] = compose_audit_markdown(cur["header"], cur["findings"])
+            cur["tally"] = severity_tally(cur["findings"])
             go("deck_generating")
             st.rerun()
     with action_cols[4]:
@@ -779,47 +826,61 @@ elif st.session_state.step == "deck_generating":
     st.markdown('<div class="screen-kicker">Step 6 of 6 — Deck</div>', unsafe_allow_html=True)
     st.markdown("## Generating your deck")
 
-    language = st.session_state.language[0] if st.session_state.language else "English"
+    langs = list(st.session_state.audits.keys())
+    n_langs = len(langs)
 
     status = st.empty()
     progress = st.progress(0)
-
-    def on_progress(current, total, label):
-        pct = min(current / max(total, 1), 1.0)
-        progress.progress(pct)
-        status.markdown(
-            f'<div style="display:flex;align-items:center;gap:8px;font-size:13px;color:#71717a;">'
-            f'<span class="spinner-dot"></span>'
-            f"Laying out slide {current} of {total} — {label}"
-            f"</div>",
-            unsafe_allow_html=True,
-        )
-
-    # Extract benchmark text from audit
-    benchmark_text = ""
-    if st.session_state.benchmark != "none":
-        benchmark_text = extract_benchmark_section(st.session_state.audit_text)
 
     # Pages reviewed from screenshots
     pages = ", ".join(s["name"] for s in st.session_state.screenshots) if st.session_state.screenshots else ""
 
     try:
-        deck_bytes = generate_deck(
-            findings=st.session_state.audit_findings,
-            product_name=st.session_state.product_name,
-            language=language,
-            mode=st.session_state.mode,
-            benchmark=st.session_state.benchmark,
-            screenshots=st.session_state.screenshots,
-            tally=st.session_state.audit_tally,
-            target_users=st.session_state.target_users,
-            pages_reviewed=pages,
-            benchmark_text=benchmark_text,
-            competitors=st.session_state.competitors,
-            comp_screenshots=st.session_state.comp_screenshots,
-            progress_callback=on_progress,
-        )
-        st.session_state.deck_bytes = deck_bytes
+        for lang_i, lang in enumerate(langs):
+            cur = st.session_state.audits[lang]
+
+            benchmark_text = ""
+            if st.session_state.benchmark != "none":
+                benchmark_text = extract_benchmark_section(cur["text"])
+
+            # Condense findings/benchmark into shorter, slide-ready copy.
+            # The full written audit (cur) is left untouched — only the deck's
+            # copy is shortened. Falls back to originals on any failure.
+            condensed_findings, condensed_benchmark = condense_for_deck(
+                api_key=st.session_state.api_key,
+                findings=cur["findings"],
+                benchmark_md=benchmark_text,
+                language=lang,
+            )
+
+            def on_progress(current, total, label, _lang=lang, _lang_i=lang_i):
+                pct = (_lang_i + min(current / max(total, 1), 1.0)) / n_langs
+                progress.progress(pct)
+                status.markdown(
+                    f'<div style="display:flex;align-items:center;gap:8px;font-size:13px;color:#71717a;">'
+                    f'<span class="spinner-dot"></span>'
+                    f"({_lang}) Laying out slide {current} of {total} — {label}"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
+            deck_bytes = generate_deck(
+                findings=condensed_findings,
+                product_name=st.session_state.product_name,
+                language=lang,
+                mode=st.session_state.mode,
+                benchmark=st.session_state.benchmark,
+                screenshots=st.session_state.screenshots,
+                tally=cur["tally"],
+                target_users=st.session_state.target_users,
+                pages_reviewed=pages,
+                benchmark_text=condensed_benchmark,
+                competitors=st.session_state.competitors,
+                comp_screenshots=st.session_state.comp_screenshots,
+                progress_callback=on_progress,
+            )
+            st.session_state.decks[lang] = deck_bytes
+
         progress.progress(1.0)
         status.markdown("**Deck generated.**")
         time.sleep(0.5)
@@ -840,13 +901,18 @@ elif st.session_state.step == "deck_ready":
     st.markdown("## Deck ready")
     st.markdown(
         "A presentation summary of the audit, formatted for client presentation — "
-        "same findings, same severity coding."
+        "same findings, same severity coding, shortened to fit the slide format."
     )
 
-    # Deck preview thumbnails
-    n_findings = len(st.session_state.audit_findings)
+    langs = list(st.session_state.decks.keys())
+    base_name = st.session_state.product_name.lower().replace(" ", "_")
+
+    # Deck preview thumbnails (based on the active/first available language)
+    preview_lang = st.session_state.active_language if st.session_state.active_language in st.session_state.audits else (langs[0] if langs else "")
+    preview_findings = st.session_state.audits.get(preview_lang, {}).get("findings", [])
+
     slide_labels = ["Title", "Summary"]
-    for f in st.session_state.audit_findings[:4]:
+    for f in preview_findings[:4]:
         slide_labels.append(f["title"][:20])
     slide_labels.append("Closing")
 
@@ -858,21 +924,43 @@ elif st.session_state.step == "deck_ready":
                 unsafe_allow_html=True,
             )
 
-    # Download buttons
+    # Download buttons — one per language, plus a zip-all when there's more than one
     st.markdown("---")
-    dl_cols = st.columns([1, 1, 1])
-    with dl_cols[0]:
-        if st.session_state.deck_bytes:
+    if len(langs) > 1:
+        st.caption(f"Decks generated in {len(langs)} languages — download each individually or grab them all as a .zip.")
+
+    n_buttons = len(langs) + (1 if len(langs) > 1 else 0) + 1  # + "Start new audit"
+    dl_cols = st.columns(n_buttons)
+
+    for i, lang in enumerate(langs):
+        with dl_cols[i]:
+            suffix = f"_{lang.lower()}" if len(langs) > 1 else ""
             st.download_button(
-                "Download .pptx",
-                data=st.session_state.deck_bytes,
-                file_name=f"ux_audit_{st.session_state.product_name.lower().replace(' ', '_')}.pptx",
+                f"Download .pptx ({lang})" if len(langs) > 1 else "Download .pptx",
+                data=st.session_state.decks[lang],
+                file_name=f"ux_audit_{base_name}{suffix}.pptx",
                 mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
                 type="primary",
+                key=f"dl_deck_{lang}",
             )
-    with dl_cols[1]:
-        st.caption("PDF export requires LibreOffice — not available on Streamlit Cloud. Download the .pptx and export locally.")
-    with dl_cols[2]:
+
+    next_col = len(langs)
+    if len(langs) > 1:
+        with dl_cols[next_col]:
+            zip_buf = io.BytesIO()
+            with zipfile.ZipFile(zip_buf, "w") as zf:
+                for lang in langs:
+                    zf.writestr(f"ux_audit_{base_name}_{lang.lower()}.pptx", st.session_state.decks[lang])
+            st.download_button(
+                "Download all (.zip)",
+                data=zip_buf.getvalue(),
+                file_name=f"ux_audit_{base_name}_decks.zip",
+                mime="application/zip",
+                key="dl_deck_zip",
+            )
+        next_col += 1
+
+    with dl_cols[next_col]:
         if st.button("Start new audit"):
             for k, v in DEFAULTS.items():
                 st.session_state[k] = v
