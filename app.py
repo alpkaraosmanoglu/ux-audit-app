@@ -31,6 +31,7 @@ from audit_engine import (
     tally_string,
 )
 from deck_engine import generate_deck
+from feedback_store import RATING_LABELS, save_finding_feedback
 from pdf_engine import generate_audit_pdf
 
 # ---------------------------------------------------------------------------
@@ -765,13 +766,14 @@ elif st.session_state.step == "audit":
                 "body": "**Finding:** Describe the observation.\n\n**Solution:** Describe the fix.",
                 "heuristic": "",
                 "evidence": "",
+                "ui_mockup": None,
                 "screenshot_index": None,
                 "full_text": "",
             })
             st.rerun()
 
     elif findings:
-        for f in findings:
+        for i, f in enumerate(findings):
             sev_class = f"sev-{f['severity']}"
             shot_data = resolve_screenshot(f)
 
@@ -805,6 +807,37 @@ elif st.session_state.step == "audit":
                         f'<div class="finding-cite">{f["heuristic"]}</div>',
                         unsafe_allow_html=True,
                     )
+
+            with st.expander("💬 Feedback for the design team", expanded=False):
+                fb_col1, fb_col2 = st.columns([2, 3])
+                with fb_col1:
+                    fb_rating_label = st.radio(
+                        "Rating",
+                        list(RATING_LABELS.values()),
+                        key=f"fb_rating_{language}_{i}",
+                        label_visibility="collapsed",
+                    )
+                with fb_col2:
+                    fb_comment = st.text_area(
+                        "Why? (optional — helps calibrate future audits)",
+                        key=f"fb_comment_{language}_{i}",
+                        height=68,
+                        placeholder="Why? (optional) — this trains future audits.",
+                    )
+                if st.button("Save feedback", key=f"fb_save_{language}_{i}"):
+                    rating_key = next(k for k, v in RATING_LABELS.items() if v == fb_rating_label)
+                    save_finding_feedback(
+                        product_name=st.session_state.product_name,
+                        industry=st.session_state.industry,
+                        mode=st.session_state.mode,
+                        language=language,
+                        finding_title=f["title"],
+                        finding_severity=f["severity_raw"],
+                        finding_excerpt=f["body"][:400],
+                        rating=rating_key,
+                        comment=fb_comment,
+                    )
+                    st.success("Saved — thanks. This will help calibrate future audits.")
 
             st.divider()
     else:

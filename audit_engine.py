@@ -13,6 +13,8 @@ import re
 
 import anthropic
 
+from feedback_store import build_calibration_section
+
 REFERENCES_DIR = pathlib.Path(__file__).parent / "skills" / "ux-audit-skill" / "references"
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
@@ -64,7 +66,7 @@ The audit mode is **{mode}**.
 ## Calibration — example findings
 Study these examples carefully. They set the bar for structure, tone, and depth.
 {calibration}
-
+{designer_feedback}
 ## Method — two-pass walkthrough
 Analyze in two modes:
 1. **Novice pass** — encounter the product as a first-time user. What feels off, \
@@ -238,6 +240,9 @@ def build_system_prompt(
         "3. **Benchmarking** — as instructed below\n" if benchmark != "none" else ""
     )
 
+    feedback_section = build_calibration_section()
+    designer_feedback = f"\n{feedback_section}\n" if feedback_section else ""
+
     return SYSTEM_PROMPT_TEMPLATE.format(
         language=language,
         language_labels=_language_labels(),
@@ -245,6 +250,7 @@ def build_system_prompt(
         mode_rules=MODE_RULES.get(mode, MODE_RULES["screenshots"]),
         frameworks=_frameworks(),
         calibration=_calibration_examples(),
+        designer_feedback=designer_feedback,
         benchmark_cover=benchmark_cover,
         benchmark_section=benchmark_section,
         product_context=product_context,
@@ -441,6 +447,33 @@ def stream_audit(
 # Parse findings from Markdown output
 # ---------------------------------------------------------------------------
 
+UI_MOCKUP_PATTERNS = {
+    "modal", "sticky_bar", "tooltip", "toast", "inline_validation", "dropdown",
+}
+
+UI_MOCKUP_FIELD_RE = re.compile(r'(\w+)\s*=\s*"([^"]*)"')
+
+
+def parse_ui_mockup(raw: str) -> dict | None:
+    """Parse a '<pattern> | title="..." | body="..." | primary="..." | \
+    secondary="..."' line (the value captured after the **UI mockup:** label) \
+    into a dict, or None if the pattern isn't one we know how to draw."""
+    if not raw:
+        return None
+    parts = [p.strip() for p in raw.split("|")]
+    if not parts:
+        return None
+    pattern = parts[0].strip().lower().replace(" ", "_")
+    if pattern not in UI_MOCKUP_PATTERNS:
+        return None
+    fields = {"pattern": pattern}
+    for part in parts[1:]:
+        m = UI_MOCKUP_FIELD_RE.match(part)
+        if m:
+            fields[m.group(1).lower()] = m.group(2)
+    return fields
+
+
 def parse_findings(audit_md: str) -> list[dict]:
     """Extract structured findings from the audit Markdown.
 
@@ -483,6 +516,14 @@ def parse_findings(audit_md: str) -> list[dict]:
         if ev_match:
             evidence = ev_match.group(1).strip()
 
+        ui_mockup = None
+        mockup_match = re.search(
+            r"\*\*(?:UI mockup|Arayüz taslağı|UI-Mockup)\s*:?\*\*\s*(.+?)(?:\n\n|\n\*\*|\Z)",
+            body, re.DOTALL
+        )
+        if mockup_match:
+            ui_mockup = parse_ui_mockup(mockup_match.group(1).strip())
+
         # Reliable screenshot lookup: the prompt instructs the model to cite
         # "Screenshot N" exactly, so prefer this numeric index over fuzzy
         # filename matching (which breaks whenever the model paraphrases).
@@ -498,6 +539,7 @@ def parse_findings(audit_md: str) -> list[dict]:
             "body": body,
             "heuristic": heuristic,
             "evidence": evidence,
+            "ui_mockup": ui_mockup,
             "screenshot_index": screenshot_index,
             "full_text": part.strip(),
         })
@@ -594,6 +636,28 @@ the specific observation and its consequence — cut background, keep the point.
 multiple options, to 2–3 short fragments — no more than ~20 words total.
 - Omit the **Heuristic** line unless it is essential; the deck has very \
 limited room for citations.
+- After the Suggestions/Solution line (and before Evidence reference), if — \
+and only if — the finding's suggestion clearly proposes one specific, \
+drawable UI element, add ONE line in this exact machine-readable format: \
+`**UI mockup:** <pattern> | title="..." | body="..." | primary="..." | \
+secondary="..."`
+  - `<pattern>` must be exactly one of: modal, sticky_bar, tooltip, toast, \
+inline_validation, dropdown — pick whichever this specific UI element \
+actually is. Use `modal` for pop-ups/dialogs/confirmation overlays, \
+`sticky_bar` for persistent bars/banners fixed to an edge, `tooltip` for a \
+small contextual callout attached to an element, `toast` for a brief corner \
+notification, `inline_validation` for a form-field error/hint message, \
+`dropdown` for a menu/select panel.
+  - title/body/primary/secondary are optional — include only the fields \
+that make sense for that pattern (e.g. tooltip usually needs only `body`; a \
+form field needs `title` + `body`, not buttons). Keep each field very short \
+(title ≤40 chars, body ≤70 chars, primary/secondary ≤16 chars), in {language}.
+  - Do NOT add this line for findings that don't propose a single concrete, \
+renderable UI element (e.g. "improve navigation clarity" or "simplify the \
+checkout flow" — these are too abstract to mock up). When in doubt, omit it.
+  - This line is never shown to the reader as-is — it's parsed to draw a \
+small wireframe. Never explain or reference it in the Finding/Suggestion \
+prose itself.
 - If a benchmark section is present, shorten each claim/bullet to roughly \
 half its original length while preserving its meaning.
 - CRITICAL: preserve every `[Verified]`, `[Unverified]`, or `[Outdated?]` tag \
