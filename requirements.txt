@@ -3,3 +3,4 @@ anthropic>=0.34.0
 python-pptx>=1.0.0
 Pillow>=10.0.0
 reportlab>=4.0.0
+requests>=2.31.0
