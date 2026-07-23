@@ -33,6 +33,7 @@ from audit_engine import (
 from deck_engine import generate_deck
 from feedback_store import RATING_LABELS, save_finding_feedback
 from pdf_engine import generate_audit_pdf
+from screenshot_capture import ScreenshotCaptureError, capture_url_screenshot
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -52,6 +53,7 @@ DEFAULTS = {
     "step": "home",
     "api_key": "",
     "key_touched": False,
+    "screenshot_api_key": "",
     "language": ["English"],
     "mode": "screenshots",
     "product_name": "",
@@ -252,6 +254,24 @@ elif st.session_state.step == "setup":
                     st.rerun()
                 else:
                     st.rerun()
+
+    with st.expander("Optional: connect a screenshot capture key"):
+        st.markdown(
+            "If you'll be benchmarking against competitors by URL, you can connect a "
+            "[ScreenshotOne](https://screenshotone.com/) API key to auto-capture a live "
+            "screenshot of a competitor's page instead of doing it manually. This is "
+            "entirely optional — you can always upload screenshots yourself instead."
+        )
+        st.session_state.screenshot_api_key = st.text_input(
+            "ScreenshotOne access key",
+            value=st.session_state.screenshot_api_key,
+            type="password",
+            help="Stored only in this browser session. Cleared when you close the tab.",
+        )
+        st.caption(
+            "Stored only in this browser session, never written to disk. "
+            "[Get a free key from ScreenshotOne →](https://screenshotone.com/)"
+        )
 
 
 # =========================================================================
@@ -511,6 +531,18 @@ elif st.session_state.step == "config":
                     {"name": f.name, "data": f.read(), "mime_type": f.type or "image/png"}
                     for f in comp_files
                 ]
+
+            if st.session_state.screenshot_api_key and comp.get("url"):
+                if st.button(f"📸 Auto-capture screenshot from URL", key=f"comp_capture_{i}"):
+                    with st.spinner(f"Capturing {comp['url']}…"):
+                        try:
+                            shot = capture_url_screenshot(
+                                st.session_state.screenshot_api_key, comp["url"]
+                            )
+                            st.session_state.comp_screenshots.setdefault(i, []).append(shot)
+                            st.success(f"Captured {shot['name']}")
+                        except ScreenshotCaptureError as e:
+                            st.error(str(e))
 
             if len(st.session_state.competitors) > 1:
                 if st.button(f"Remove competitor {i+1}", key=f"rm_comp_{i}"):
