@@ -159,6 +159,25 @@ VERIFICATION_TAG_RULE = (
     "(features, pricing, market share, launch dates, named capabilities)."
 )
 
+SUGGESTED_COMPETITORS_RULE = (
+    "After covering the named competitors, add a short closing subsection titled "
+    "'Other brands worth benchmarking' (translate this title into the audit's output "
+    "language) recommending 1–3 additional, real, currently-operating competitors in "
+    "the same space that the user did NOT "
+    "name — pick ones the audited product's own team would plausibly want to compare "
+    "against but may not have thought to include, based on the product context given "
+    "above (industry, target users, named competitors). Use the web_search tool to confirm "
+    "each suggested brand is real, currently operating, and actually relevant to this "
+    "product's industry/sector before including it — never invent a brand name. For "
+    "each: one line naming it plus a one-sentence reason it's relevant (e.g. a "
+    "specific feature or market position that makes it worth comparing against). "
+    "Clearly distinguish this from the named-competitor analysis above — these are "
+    "tool-suggested, not user-specified, and get no deep UX pattern breakdown, just "
+    "the name + reason. If you cannot confidently identify any genuinely relevant, "
+    "real brand beyond the ones already named, omit this subsection entirely rather "
+    "than padding it with a weak or generic suggestion. " + VERIFICATION_TAG_RULE
+)
+
 BENCHMARK_INSTRUCTIONS = {
     "none": "",
     "market": (
@@ -183,7 +202,7 @@ BENCHMARK_INSTRUCTIONS = {
         "that visual/structural evidence too — it's the strongest signal when available, "
         "but its absence is not a blocker. Assign a Kano tier to each pattern and compare "
         "to the audited product. End with a 'What to steal, what to ignore' paragraph. "
-        + VERIFICATION_TAG_RULE
+        + VERIFICATION_TAG_RULE + "\n\n" + SUGGESTED_COMPETITORS_RULE
     ),
     "both": (
         "## Benchmarking — Market + Competitors\n"
@@ -194,7 +213,7 @@ BENCHMARK_INSTRUCTIONS = {
         "in any competitor screenshots/URLs provided below when available — useful but "
         "not required. (3) Synthesis paragraph: which competitor patterns are broad "
         "market moves vs. unique differentiators. End with 'What to steal, what to "
-        "ignore'. " + VERIFICATION_TAG_RULE
+        "ignore'. " + VERIFICATION_TAG_RULE + "\n\n" + SUGGESTED_COMPETITORS_RULE
     ),
 }
 
